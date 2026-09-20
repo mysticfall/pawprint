@@ -13,7 +13,7 @@ asynchronous requests, native result undo/redo, optional geometry-depth guidance
 and IPAdapter reference conditioning. Per-layer ordered LoRA stacks support a
 configurable strength for each entry. A **Z Image Turbo** adapter offers the
 same user-facing workflow through a DiffSynth ControlNet model patch and
-noise-mask inpainting.
+reference inpainting with colour matching.
 Lower layer groups can be baked into the UV base with one-step undo.
 Composite-estimated depth remains a later slice.
 The manifest remains at 0.2.0; development slices do not each get a version bump.
@@ -194,14 +194,19 @@ materials are not baked into the initial gray base.
     Each prompt field has a dropdown listing previously used prompts (recorded when
     Generate runs, kept per scene, newest first, up to 32 entries); choose one to
     replace the field, or use its **Clear history** entry to reset the list.
-    4. Choose the full frame or selected context, feather and padding. With SDXL, a
-        selection means inpainting: the request routes through
-        `InpaintModelConditioning` and an `ImageCompositeMasked` output stage, so the
-        selected pixels are regenerated rather than refined (denoise 1.0 re-imagines
-        them completely) while the server returns the original pixels outside the
-        selection exactly. With Z Image Turbo, a selection rides the request's noise
-        mask (`SetLatentNoiseMask`) and the client-side feathered stencil keeps
-        every unselected pixel exact. **Clear**
+     4. Choose the full frame or selected context, feather and padding. A
+         selection means inpainting. With SDXL the request routes through
+         `InpaintModelConditioning` and an `ImageCompositeMasked` output stage, so the
+         selected pixels are regenerated rather than refined (denoise 1.0 re-imagines
+         them completely) while the surrounding context conditions each step for a
+         seamless blend and the server returns the original pixels outside the
+         selection exactly. With Z Image Turbo, selections run a reference inpainting
+         pipeline: at denoise 1.0 the region is pre-filled by a dedicated MAT inpaint
+         model and steered by the Fun ControlNet in inpaint mode, and at lower denoise
+         the original latent is refined from a softened sigma schedule — both paths
+         finish with an `INPAINT_ColorMatch` step so the repaired pixels blend with
+         the surrounding context, while the client-side feathered stencil keeps every
+         unselected pixel exact. **Clear**
         means unrestricted generation over the full image as ordinary img2img; the
         latent always comes from the rendered composite, even at denoise 1.0. There
         is no toggle: the selection alone picks the mode. Each
@@ -230,13 +235,13 @@ materials are not baked into the initial gray base.
     7. Plain selection inpainting needs no ControlNet and no extra server nodes —
         `InpaintModelConditioning` and `ImageCompositeMasked` are core ComfyUI nodes.
         A union ControlNet is only involved when **Depth guidance** is enabled
-        (step 5). Z Image Turbo selections use the noise mask described in step 4.
+         (step 5). Z Image Turbo selections use the inpainting described in step 4.
    8. Z Image Turbo prompts are plain text — no edit-instruction wrapping — and the
       negative conditioning is zeroed (`ConditioningZeroOut`), so the negative prompt
       field has no effect for Z Image Turbo. The **Guidance** section renders only
       features the active Model type declares: SDXL layers get depth and reference
        guidance plus the shared LoRA stack, while Z Image Turbo layers see the depth
-       ControlNet patch, compatible LoRA stack and the noise-mask selection status.
+        ControlNet patch, compatible LoRA stack and the inpaint selection status.
   9. Click **Generate**. Clean saved-view capture is synchronous and may briefly pause
      Blender. Uploading, sampling and downloading then run in a separate background
      process while Blender stays interactive. Status and **Cancel Generation** appear below.
@@ -380,7 +385,7 @@ python3 tools/generation_test.py --ipadapter
 # Same live workflow with selection inpainting (InpaintModelConditioning + ImageCompositeMasked) at denoise 1.0:
 python3 tools/generation_test.py --inpaint
 # Same live workflow with the Z Image Turbo adapter (z_image_turbo + LoRA stack,
-# DiffSynth ControlNet depth patch, noise-mask selection inpainting):
+# DiffSynth ControlNet depth patch, reference selection inpainting):
 python3 tools/generation_test.py --zit
 # Same live workflow with a three-candidate batch: review, switching, commit
 # (seed adoption, one-step undo) and a discarded second batch:
@@ -447,7 +452,7 @@ object context, render/color/visibility and brush/clone settings restoration, ex
 unselected/other-layer pixels, single-step native undo/redo, cancellation cleanup,
 and rejection of stale pixels or changed target layers. `--zit` runs the same
 pipeline through the Z Image Turbo adapter and additionally verifies the DiffSynth
-ControlNet depth patch and noise-mask wiring in the submitted graph.
+ControlNet depth patch and inpaint wiring in the submitted graph.
 `tools/backend_test.py`
 uses a local fake HTTP server to check errors, missing nodes, parameter wiring and
 cancellation during submission without interrupting unrelated jobs. Source-linked

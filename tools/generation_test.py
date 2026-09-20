@@ -422,14 +422,14 @@ def worker():
                         assert entry, 'Server history lost the completed job'
                         graph = entry['prompt'][2]
                         classes = {key: value['class_type'] for key, value in graph.items()}
-                        # The submitted graph follows the selection alone:
-                        # masked requests run the inpaint workflow built around
-                        # InpaintModelConditioning, unmasked ones plain
-                        # whole-frame img2img.
+                        # The submitted graph follows the selection and the
+                        # adapter: SDXL selections run InpaintModelConditioning,
+                        # ZIT selections run the reference inpaint pipeline and
+                        # unmasked requests plain whole-frame img2img.
                         if state.get('zit'):
-                            # Z Image Turbo: plain text conditioning with a
-                            # zeroed negative, model-patch guidance and the
-                            # noise-mask latent; no SDXL-style plumbing.
+                            # Z Image Turbo reference inpainting: MAT pre-fill,
+                            # Fun ControlNet in inpaint mode, DifferentialDiffusion
+                            # and the advanced sampling stack with colour match.
                             assert classes['30'] == 'UNETLoader', classes.get('30')
                             assert classes['34'] == 'CLIPLoader'
                             assert graph['34']['inputs']['type'] == 'lumina2'
@@ -439,23 +439,60 @@ def worker():
                             assert classes['38'] == 'CLIPTextEncode'
                             assert graph['38']['inputs']['clip'] == ['37', 0]
                             assert graph['38']['inputs']['text'] == layer.generation_positive
-                            assert classes['39'] == 'ConditioningZeroOut'
-                            assert classes['6'] == 'SetLatentNoiseMask'
-                            assert graph['6']['inputs']['mask'] == ['4', 0]
-                            assert graph['40']['inputs']['denoise'] == 1.0
+                            feather = layer.generation_feather
+                            assert classes['26'] == 'INPAINT_ExpandMask'
+                            assert graph['26']['inputs'] == {'mask': ['4', 0], 'grow': feather,
+                                                             'blur': int(feather * 1.7), 'blur_type': 'linear'}
+                            assert classes['27'] == 'INPAINT_StabilizeMask'
+                            assert graph['27']['inputs'] == {'mask': ['26', 0], 'epsilon': 0.01}
+                            assert classes['28'] == 'ThresholdMask'
+                            assert graph['28']['inputs'] == {'mask': ['27', 0], 'value': 0.0}
+                            assert classes['33'] == 'INPAINT_ExpandMask'
+                            assert graph['33']['inputs'] == {'mask': ['4', 0], 'grow': 4, 'blur': 0,
+                                                             'blur_type': 'gaussian'}
+                            assert classes['42'] == 'INPAINT_LoadInpaintModel'
+                            assert classes['43'] == 'INPAINT_InpaintWithModel'
+                            assert graph['43']['inputs']['image'] == ['36', 0]
+                            assert graph['43']['inputs']['mask'] == ['33', 0]
+                            assert classes['44'] == 'ModelPatchLoader'
+                            assert classes['45'] == 'ZImageFunControlnet'
+                            assert graph['45']['inputs']['model_patch'] == ['44', 0]
+                            assert graph['45']['inputs']['vae'] == ['35', 0]
+                            assert graph['45']['inputs']['inpaint_image'] == ['36', 0]
+                            assert graph['45']['inputs']['mask'] == ['28', 0]
+                            assert graph['45']['inputs']['strength'] == layer.generation_zit_strength
+                            assert classes['25'] == 'DifferentialDiffusion'
+                            assert classes['46'] == 'VAEEncode'
+                            assert graph['46']['inputs']['pixels'] == ['43', 0]
+                            assert classes['47'] == 'SetLatentNoiseMask'
+                            assert graph['47']['inputs']['mask'] == ['27', 0]
+                            assert classes['48'] == 'RandomNoise'
+                            assert classes['49'] == 'KSamplerSelect'
+                            assert classes['52'] == 'BasicScheduler'
+                            assert graph['52']['inputs']['denoise'] == 1.0
+                            assert classes['54'] == 'BasicGuider'
+                            assert graph['54']['inputs']['conditioning'] == ['38', 0]
+                            assert classes['55'] == 'SamplerCustomAdvanced'
+                            assert graph['55']['inputs']['latent_image'] == ['47', 0]
+                            assert graph['55']['inputs']['sigmas'] == ['52', 0]
+                            assert classes['41'] == 'VAEDecode'
+                            assert graph['41']['inputs']['samples'] == ['55', 1]
+                            assert classes['56'] == 'INPAINT_ColorMatch'
+                            assert graph['56']['inputs']['reference'] == ['43', 0]
+                            assert graph['56']['inputs']['exclude_mask'] == ['27', 0]
                             assert classes['10'] == 'PreviewImage'
+                            assert graph['10']['inputs']['images'] == ['56', 0]
                             if len(layer.generation_loras):
                                 assert classes['50'] == 'LoraLoaderModelOnly'
                                 assert graph['50']['inputs']['lora_name'] == layer.generation_loras[0].model
+                                assert graph['45']['inputs']['model'] == ['50', 0]
                             if layer.generation_depth_enabled:
-                                assert classes['44'] == 'ModelPatchLoader'
-                                assert classes['45'] == 'QwenImageDiffsynthControlnet'
                                 assert graph['45']['inputs']['image'] == ['12', 0]
-                                assert graph['32']['inputs']['model'] == ['45', 0]
                             assert 'ControlNetLoader' not in classes.values()
                             assert 'ControlNetApplyAdvanced' not in classes.values()
                             assert 'VAEEncodeForInpaint' not in classes.values()
-                            assert 'InpaintModelConditioning' not in classes.values()
+                            assert 'InpaintPreprocessor' not in classes.values()
+                            assert 'ConditioningZeroOut' not in classes.values()
                             assert 'TextEncodeQwenImageEditPlus' not in classes.values()
                         elif state.get('masked'):
                             # Model conditioning builds the inpaint latent and

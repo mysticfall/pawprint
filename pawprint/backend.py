@@ -147,9 +147,15 @@ REQUIRED = {'CheckpointLoaderSimple', 'LoadImage', 'ImageToMask', 'VAEEncode',
             'PreviewImage', 'InpaintModelConditioning', 'ImageCompositeMasked'}
 ZIT_REQUIRED = {'UNETLoader', 'CLIPLoader', 'VAELoader', 'CLIPSetLastLayer', 'CLIPTextEncode',
                 'ConditioningZeroOut', 'ModelSamplingAuraFlow', 'VAEEncode',
-                'SetLatentNoiseMask', 'KSampler', 'VAEDecode', 'LoadImage', 'PreviewImage'}
-# DiffSynth ControlNet patches (model_patch) loaded through ModelPatchLoader.
-ZIT_CONTROLNET_NODES = {'ModelPatchLoader', 'QwenImageDiffsynthControlnet'}
+                'SetLatentNoiseMask', 'KSampler', 'VAEDecode', 'LoadImage', 'PreviewImage',
+                'DifferentialDiffusion', 'ZImageFunControlnet', 'INPAINT_ExpandMask',
+                'INPAINT_StabilizeMask', 'INPAINT_ColorMatch', 'INPAINT_LoadInpaintModel',
+                'INPAINT_InpaintWithModel', 'ThresholdMask', 'SplitSigmas', 'RandomNoise',
+                'KSamplerSelect', 'BasicScheduler', 'BasicGuider', 'SamplerCustomAdvanced'}
+# DiffSynth ControlNet patches (model_patch) loaded through ModelPatchLoader; the
+# Fun ControlNet apply covers inpaint mode (ZImageFunControlnet) and depth
+# guidance (QwenImageDiffsynthControlnet).
+ZIT_CONTROLNET_NODES = {'ModelPatchLoader', 'QwenImageDiffsynthControlnet', 'ZImageFunControlnet'}
 
 
 def encoder_for(model):
@@ -169,6 +175,7 @@ def capabilities(info):
     caps['adapters'] = dict(SDXL=not sdxl_missing, ZIT=not zit_missing)
     caps['checkpoints'] = caps['controlnet_models'] = caps['ipadapter_models'] = []
     caps['zit_unets'] = caps['zit_loras'] = caps['zit_controlnets'] = []
+    caps['zit_inpaint'] = None
     caps['loras'] = []
     caps['samplers'] = caps['schedulers'] = []
     caps['ranges'] = {}
@@ -196,6 +203,13 @@ def capabilities(info):
         caps['zit_vae'] = _prefer(info['VAELoader']['input']['required']['vae_name'][0], 'ae')
         if ZIT_CONTROLNET_NODES <= info.keys():
             caps['zit_controlnets'] = info['ModelPatchLoader']['input']['required']['name'][0]
+        # The pre-fill stage of full-denoise inpainting picks a dedicated
+        # inpaint model the way the CLIP/VAE names resolve. Newer servers
+        # expose combos as [type, config] with the options inside the config.
+        model_spec = info['INPAINT_LoadInpaintModel']['input']['required']['model_name']
+        model_names = model_spec[0] if isinstance(model_spec[0], list) \
+            else model_spec[1].get('options', [])
+        caps['zit_inpaint'] = _prefer(model_names, 'mat')
     if 'LoraLoaderModelOnly' in info:
         # Every server LoRA is offered to SDXL; the ZIT table filters to zit/
         # weights through caps['zit_loras'] above.
@@ -235,8 +249,14 @@ def validate(settings, caps):
                 raise ValueError(f"{spec['name']} is not available on this server: {value}")
             if 'min' in spec and not spec['min'] <= value <= spec.get('max', value):
                 raise ValueError(f"{spec['name']} must be at least {spec['min']}")
-        if settings.get('depth_enabled') and settings['zit_controlnet'] not in caps['zit_controlnets']:
+        # Depth guidance and full-denoise inpainting both need the DiffSynth
+        # patch pair; full-denoise inpainting additionally needs a pre-fill
+        # inpaint model.
+        if (settings.get('depth_enabled') or (settings.get('masked') and settings.get('denoise', 1.0) >= 1.0)) \
+                and settings['zit_controlnet'] not in caps['zit_controlnets']:
             raise ValueError(f"ControlNet patch is not available on this server: {settings['zit_controlnet']}")
+        if settings.get('masked') and settings.get('denoise', 1.0) >= 1.0 and not caps.get('zit_inpaint'):
+            raise ValueError('Inpaint model is not available on this server')
         _validate_numeric(settings, caps)
         return
     optional = ('depth_', 'ipadapter_')
@@ -349,11 +369,8 @@ def _zit_workflow(settings, image, mask, depth=None, caps=None):
         '36': node('LoadImage', image=image),
         '3': node('LoadImage', image=mask),
         '4': node('ImageToMask', image=['3', 0], channel='red'),
-        # The latent is always the encoded composite; ZIT has no
-        # inpaint-specialised encoder, so selections ride on the noise mask
-        # and the feathered client stencil confines the applied result.
-        '5': node('VAEEncode', pixels=['36', 0], vae=['35', 0]),
-        '6': node('SetLatentNoiseMask', samples=['5', 0], mask=['4', 0]),
+        '37': node('CLIPSetLastLayer', clip=['34', 0], stop_at_clip_layer=-settings['clip_skip']),
+        '38': node('CLIPTextEncode', clip=['37', 0], text=settings['positive']),
     }
     # The per-layer LoRA stack chains on top of the UNet in listed order.
     model = ['30', 0]
@@ -362,6 +379,65 @@ def _zit_workflow(settings, image, mask, depth=None, caps=None):
         graph[key] = node('LoraLoaderModelOnly', model=model,
                           lora_name=lora['name'], strength_model=lora['strength'])
         model = [key, 0]
+    if settings.get('masked'):
+        # Selections follow the confirmed external reference pipelines. At full
+        # denoise a dedicated inpaint model pre-fills the selection and the Fun
+        # ControlNet runs in inpaint mode, feeding the surrounding context to
+        # the sampler; below full denoise the original pixels refine directly
+        # with a softened sigma schedule. Both paths re-match colors against
+        # their reference outside the selection.
+        full = settings['denoise'] >= 1.0
+        feather = settings.get('feather', 0)
+        graph['26'] = node('INPAINT_ExpandMask', mask=['4', 0], grow=feather,
+                           blur=int(feather * 1.7), blur_type='linear')
+        noise_mask = exclude = ['26', 0]
+        reference = ['36', 0]
+        if full:
+            graph['27'] = node('INPAINT_StabilizeMask', mask=['26', 0], epsilon=0.01)
+            graph['28'] = node('ThresholdMask', mask=['27', 0], value=0.0)
+            noise_mask = exclude = ['27', 0]
+            graph['33'] = node('INPAINT_ExpandMask', mask=['4', 0], grow=4, blur=0,
+                               blur_type='gaussian')
+            graph['42'] = node('INPAINT_LoadInpaintModel',
+                               model_name=(caps or {}).get('zit_inpaint'))
+            graph['43'] = node('INPAINT_InpaintWithModel', inpaint_model=['42', 0],
+                               image=['36', 0], mask=['33', 0], seed=int(settings['seed']))
+            reference = ['43', 0]
+            graph['44'] = node('ModelPatchLoader', name=settings['zit_controlnet'])
+            control_image = None
+            if settings.get('depth_enabled'):
+                if depth is None:
+                    raise ValueError('Depth guidance image is missing')
+                graph['12'] = node('LoadImage', image=depth)
+                control_image = ['12', 0]
+            graph['45'] = node('ZImageFunControlnet', model=model, model_patch=['44', 0],
+                               vae=['35', 0], image=control_image, inpaint_image=['36', 0],
+                               mask=['28', 0], strength=settings['zit_strength'])
+            model = ['45', 0]
+        graph['25'] = node('DifferentialDiffusion', model=model)
+        model = ['25', 0]
+        graph['46'] = node('VAEEncode', pixels=reference, vae=['35', 0])
+        graph['47'] = node('SetLatentNoiseMask', samples=['46', 0], mask=noise_mask)
+        graph['48'] = node('RandomNoise', noise_seed=int(settings['seed']))
+        graph['49'] = node('KSamplerSelect', sampler_name=settings['sampler'])
+        graph['52'] = node('BasicScheduler', model=model, scheduler=settings['scheduler'],
+                           steps=settings['steps'], denoise=1.0 if full else settings['denoise'])
+        sigmas = ['52', 0]
+        if not full:
+            # Dropping the strongest sigma softens the refinement start, as in
+            # the reference refine workflow.
+            graph['53'] = node('SplitSigmas', sigmas=['52', 0], step=1)
+            sigmas = ['53', 1]
+        graph['54'] = node('BasicGuider', model=model, conditioning=['38', 0])
+        graph['55'] = node('SamplerCustomAdvanced', noise=['48', 0], guider=['54', 0],
+                           sampler=['49', 0], sigmas=sigmas, latent_image=['47', 0])
+        graph['41'] = node('VAEDecode', samples=['55', 1], vae=['35', 0])
+        graph['56'] = node('INPAINT_ColorMatch', target=['41', 0], reference=reference,
+                           exclude_mask=exclude, strength=1.0)
+        graph['10'] = node('PreviewImage', images=['56', 0])
+        return graph
+    # Without a selection the whole frame updates as ordinary img2img; the
+    # latent always comes from the rendered composite, even at full denoise.
     if settings.get('depth_enabled'):
         if depth is None:
             raise ValueError('Depth guidance image is missing')
@@ -371,10 +447,9 @@ def _zit_workflow(settings, image, mask, depth=None, caps=None):
                            vae=['35', 0], image=['12', 0], strength=settings['zit_strength'])
         model = ['45', 0]
     graph['32'] = node('ModelSamplingAuraFlow', model=model, shift=3.0, sampling='flow')
-    graph['37'] = node('CLIPSetLastLayer', clip=['34', 0], stop_at_clip_layer=-settings['clip_skip'])
-    graph['38'] = node('CLIPTextEncode', clip=['37', 0], text=settings['positive'])
-    # Turbo samples at CFG 1; the negative conditioning is zeroed out.
     graph['39'] = node('ConditioningZeroOut', conditioning=['38', 0])
+    graph['5'] = node('VAEEncode', pixels=['36', 0], vae=['35', 0])
+    graph['6'] = node('SetLatentNoiseMask', samples=['5', 0], mask=['4', 0])
     graph['40'] = node('KSampler', model=['32', 0], positive=['38', 0], negative=['39', 0],
                        latent_image=['6', 0], seed=int(settings['seed']), steps=settings['steps'],
                        cfg=settings['cfg'], sampler_name=settings['sampler'],

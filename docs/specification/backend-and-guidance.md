@@ -350,22 +350,46 @@ choices (no code reused):
   The text encoder is `CLIPLoader` (`qwen_3_4b.safetensors`, type `lumina2`) with a
   plain `CLIPTextEncode` positive and a `ConditioningZeroOut` negative — turbo
   samples at CFG 1, so the negative prompt field has no effect for ZIT.
-- **Selections ride the noise mask.** The latent is always a `VAEEncode` of the
-  captured composite plus `SetLatentNoiseMask` (the feathered selection mask, or
-  whole-frame when no selection exists — ZIT has no inpaint-specialised encoder).
-  The client-side feathered stencil still confines the applied result, keeping
-  unselected pixels exact. The mask is uploaded for both adapters.
+- **Selections use the reference inpainting pipeline.** A selection runs a
+  dual-path workflow modelled on the user's known-working reference: the uploaded
+  mask is expanded (`INPAINT_ExpandMask`, grow = the layer's feather value, linear
+  blur) into the generation mask. At denoise 1.0 the region is first pre-filled by
+  a dedicated MAT inpaint model (`INPAINT_LoadInpaintModel` + 
+  `INPAINT_InpaintWithModel`, auto-picked from the server list like the CLIP/VAE),
+  then the Fun ControlNet patch runs in inpaint mode (`ZImageFunControlnet` with
+  `inpaint_image` + binarised mask, depth image optional) so the surrounding
+  context steers generation, and the pre-filled pixels are encoded as the latent.
+  Below denoise 1.0 the original composite is encoded directly (no pre-fill, no
+  ControlNet) and `SplitSigmas` drops the strongest sigma for a softer refinement.
+  Both paths wrap the model in `DifferentialDiffusion`, sample through the
+  advanced stack (`RandomNoise`/`KSamplerSelect`/`BasicScheduler`/`BasicGuider`/
+  `SamplerCustomAdvanced`) and finish with `INPAINT_ColorMatch` (against the
+  pre-fill at full denoise, the original below) using the expanded mask as
+  `exclude_mask`, so repaired pixels blend with the context while unselected
+  pixels stay exact. Without a selection the latent is a plain `VAEEncode` of the
+  composite plus `SetLatentNoiseMask` whole-frame img2img through
+  `ModelSamplingAuraFlow` + `KSampler`. The mask is uploaded for both adapters.
 - **Prompts are plain text** — no edit-instruction wrapping, no magenta marking.
+  In the masked pipelines the positive-only `BasicGuider` drives sampling, so the
+  negative prompt has no effect there either.
 
 Discovery requires the ZIT node set (`UNETLoader`, `CLIPLoader`, `VAELoader`,
 `CLIPSetLastLayer`, `CLIPTextEncode`, `ConditioningZeroOut`, `ModelSamplingAuraFlow`, `VAEEncode`,
-`SetLatentNoiseMask`, `KSampler`, `VAEDecode`, `LoadImage`, `PreviewImage`) and
+`SetLatentNoiseMask`, `KSampler`, `VAEDecode`, `LoadImage`, `PreviewImage`,
+`DifferentialDiffusion`, `ZImageFunControlnet`, `INPAINT_ExpandMask`,
+`INPAINT_StabilizeMask`, `INPAINT_ColorMatch`, `INPAINT_LoadInpaintModel`,
+`INPAINT_InpaintWithModel`, `ThresholdMask`, `SplitSigmas`, `RandomNoise`,
+`KSamplerSelect`, `BasicScheduler`, `BasicGuider`, `SamplerCustomAdvanced`) and
 advertises `zit_unets` (UNETLoader list), `zit_loras` (names containing `zit` or a
-`z-image` basename), and `zit_controlnets` (ModelPatchLoader names, only when
-`ModelPatchLoader` + `QwenImageDiffsynthControlnet` are both installed); the CLIP
+`z-image` basename), `zit_controlnets` (ModelPatchLoader names, when
+`ModelPatchLoader` plus either ControlNet apply node are installed) and
+`zit_inpaint` (the MAT-style inpaint model; combos in both the classic options-list
+and the newer `[type, config]` object_info shapes are understood); the CLIP
 (`qwen_3` token) and VAE (`ae` token) names are resolved automatically. Validation
-rejects ZIT requests on servers without those nodes, without the chosen unet, or —
-when depth guidance is enabled — without an available ControlNet patch. The
+rejects ZIT requests on servers without those nodes, without the chosen unet,
+without an available ControlNet patch when depth guidance is enabled or a
+selection runs at denoise 1.0, and without an inpaint model for full-denoise
+selections. The
 Guidance panel for ZIT layers offers the depth toggle, patch picker and Control
 strength instead of the SDXL stack; reference guidance is future work.
 

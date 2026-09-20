@@ -381,6 +381,9 @@ class PAWPRINT_OT_generate(bpy.types.Operator):
             # A selection routes the request through the inpainting workflow;
             # without one the whole frame updates as ordinary img2img.
             settings['masked'] = layer.selection_paths != '[]'
+            # The uploaded mask is a hard raster; the feather value drives the
+            # server-side generation-mask expansion instead of the stencil.
+            settings['feather'] = layer.generation_feather
             # The LoRA stack travels as name/strength pairs; validation and the
             # workflow chain consume it per adapter.
             settings['loras'] = [{'name': item.model, 'strength': item.strength}

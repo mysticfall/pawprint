@@ -1,6 +1,54 @@
 # Scope and validation
 
-## Current slice: ZIT batch review (version unchanged at 0.2.0)
+## Current slice: ZIT reference inpainting pipeline (version unchanged at 0.2.0)
+
+The user rejected the previous attempt: "I tested and the generated raw output in
+ComfyUI shows that the selected region doesn't reflect the outside context at
+all. Update the ZIT-inpaint workflow using @workflow.json as a reference. It's
+known to work for this scenario, and also contains many useful improvements,
+including the use of a color match node." and clarified: "The workflow example is
+from another similar program. It may use different workflows depending on the
+denoising strength. @workflow.json is for denoise strength of 1.0, and
+@workflow-refine.json is used for anything below 1.0."
+
+The two references are structurally different pipelines, so ZIT selections now
+branch on denoise. At 1.0 the selection is pre-filled by a dedicated MAT inpaint
+model (`INPAINT_InpaintWithModel`), steered by the Fun ControlNet in inpaint mode
+(`ZImageFunControlnet` with `inpaint_image` + binary mask, optional depth image),
+and colour-matched against the pre-fill. Below 1.0 the original latent is refined
+through `SplitSigmas` (dropping the strongest sigma) with no ControlNet and
+colour-matched against the original. Both wrap the model in `DifferentialDiffusion`,
+expand the generation mask from the layer's feather (`INPAINT_ExpandMask` +
+`INPAINT_StabilizeMask`), sample via the `RandomNoise`/`KSamplerSelect`/
+`BasicScheduler`/`BasicGuider`/`SamplerCustomAdvanced` stack and finish with
+`INPAINT_ColorMatch` using the expanded mask as `exclude_mask`. Paste-back stays
+client-side. The no-selection path keeps `VAEEncode` + `SetLatentNoiseMask` +
+`ModelSamplingAuraFlow`/`KSampler`. Discovery auto-picks the MAT model (`_prefer`
+'mat', handling both object_info combo shapes — a modern `[type, config]` combo
+initially resolved to the string 'C' and was rejected by the server; fixed).
+
+Verified on Blender 5.2.2 LTS / ComfyUI 0.36.0: `python3 tools/backend_test.py`
+(12 tests; full-path, refine, empty-stack, no-depth and unmasked variants) and a
+standalone live probe that ran the exact full masked graph end-to-end
+(done.json without error, result produced). The operator-level live `--zit`
+canary is pending a ComfyUI restart (server went down after the probe).
+
+## Superseded slice: ZIT model-conditioned inpainting (version unchanged at 0.2.0)
+
+The user asked: "Does inpainting work with ZIT? I found that it generates images
+that don't match with outside the selected region. Even with denoise strength
+1.0, it should take the context that lies outside the boundary into account to
+produce a seamless image."
+
+Diagnosis: ZIT selections previously used only `VAEEncode` +
+`SetLatentNoiseMask` — the masked region was denoised while the surrounding
+latent stayed clean, so at high denoise the model met a clean/noise boundary and
+did not blend with the context. This slice switched ZIT selections to
+`InpaintModelConditioning` + `ImageCompositeMasked` mirroring SDXL. It passed
+its checks but produced raw output that ignored the outside context in the
+user's live test, and was replaced by the reference pipeline above.
+
+## Previous slice: ZIT batch review (version unchanged at 0.2.0)
 
 The user found that the Batch property was only enabled with SDXL. Batch is now a
 shared adapter parameter: Z Image Turbo submits one random-seed request per
