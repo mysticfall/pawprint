@@ -91,7 +91,8 @@ Existing single-projection data migrates on load/reload.
 - `pawprint/model.py`: material-owned prototype state and image references.
 - `pawprint/projection.py`: per-fragment projection shader and saved visibility,
   including the winding-independent axial occlusion z-test with a two-texel
-  grazing margin extracted from the pure saved-window matrix.
+  grazing margin extracted from the pure saved-window matrix; mirror-folded
+  fragments skip the axial gate, reusing the kept half's visibility by design.
 - `pawprint/operators.py`: stack/layer creation, view restoration, image editing.
 - `pawprint/overlay.py`: viewport-only saved-image frame.
 - `pawprint/painting.py`: managed native saved-frame painting and session cleanup.

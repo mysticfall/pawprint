@@ -1,6 +1,40 @@
 # Scope and validation
 
-## Current slice: ZIT reference inpainting pipeline (version unchanged at 0.2.0)
+## Current slice: mirror-aware occlusion (version unchanged at 0.2.0)
+
+The user reported: "I found a regression. We tried to improve the projection
+algorithm so that it doesn't bleed to the invisible side obstructed by the mesh.
+However, it broke the mirror feature. When I batch generate candidates, preview
+works with the mirror mode enabled. But when I click the apply button, only one
+side gets applied."
+
+Diagnosis: the axial occlusion z-test re-rejected mirror-folded fragments
+whenever the kept half's snapshot depth at the folded coordinates was nearer
+than the folded fragment (twin regions that were occluded or concave from the
+saved view). Pre-axial, the plane test passed those fragments because the
+offset rides parallel to the view ("grazing"). Folding is sampling-only, so
+preview and applied rendering share coverage — the user-visible asymmetry came
+from *where* the twin region was occluded in the snapshot, not from Apply
+itself.
+
+Fix in `pawprint/projection.py` `build_material`: the mirror block's `fold`
+factor now gates the axial rejection — `behind *= (1 − fold)`. Mirror-folded
+fragments reuse the kept half's visibility snapshot by design (the discarded
+side was never captured), so occluders in front of the kept twin must not erase
+the mirrored half; direct fragments keep the full axial test and bleed
+prevention is unchanged.
+
+Verified on Blender 5.2.2 LTS: a windowed A/B probe (occluder visible during
+the depth capture, hidden at render, mirror X_PLUS) confirmed both directions —
+gate on: folded halves painted (≈[0.01, 0.01, 0.786]) while the directly
+occluded region stays base; gate off: folded halves fall back to base,
+reproducing the user symptom. `tools/projection_test.py` gained a combined
+mirror+occlusion scenario (depth recaptured with a mirror occluder, then hidden)
+and passes all three stages (Cycles, reload, EEVEE); `python3
+tools/backend_test.py` (12 tests) and the smoke test pass; the extension
+source and `dist/pawprint-0.2.0.zip` (50,698 bytes) validate.
+
+## Previous slice: ZIT reference inpainting pipeline (version unchanged at 0.2.0)
 
 The user rejected the previous attempt: "I tested and the generated raw output in
 ComfyUI shows that the selected region doesn't reflect the outside context at

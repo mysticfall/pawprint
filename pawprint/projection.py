@@ -174,6 +174,7 @@ def build_material(material):
         transform = matrix(stack.projection)
         position = geometry.outputs['Position']
         true_normal = geometry.outputs['True Normal']
+        fold = None
         if stack.mirror != 'NONE' and owner is not None:
             # Fold fragments across the object's local mirror plane before
             # projecting: the kept half maps straight through and the discarded
@@ -270,6 +271,12 @@ def build_material(material):
                                  2.0 / (window[1][1] * stack.depth.size[1]))
         axial_gap = math('SUBTRACT', w, separate.outputs[0])
         behind = math('GREATER_THAN', axial_gap, math('MULTIPLY', w, texel_margin))
+        if fold is not None:
+            # Mirror-folded fragments reuse the kept half's visibility snapshot
+            # by design: the discarded side was never captured, so occluders in
+            # front of the kept twin must not erase the mirrored half. Only the
+            # kept side keeps the full axial occlusion comparison.
+            behind = math('MULTIPLY', behind, math('SUBTRACT', 1, fold))
         coverage = math('MULTIPLY', coverage, math('SUBTRACT', 1, behind))
         visible = node('ShaderNodeValue', 'Pawprint Visibility', 700, 0)
         visible.outputs[0].default_value = float(stack.visible)

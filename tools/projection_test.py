@@ -331,6 +331,40 @@ def worker(directory, engine='CYCLES'):
     bm.free()
     obj.data.update()
     bpy.context.view_layer.update()
+
+    # Mirror folding must survive the axial occlusion gate: folded fragments
+    # reuse the kept half's visibility snapshot, so an occluder in front of
+    # the kept twin must not erase the mirrored half.
+    bpy.context.scene.camera.location = (0, 0, 5)
+    bpy.context.scene.camera.rotation_euler = (0, 0, 0)
+    occluder = bpy.data.objects.new('Mirror occluder', bpy.data.meshes.new('Mirror occluder'))
+    occluder.data.from_pydata([(0.3, -2, 0.8), (2.5, -2, 0.8), (2.5, 2, 0.8), (0.3, 2, 0.8)],
+                              [], [(0, 1, 2, 3)])
+    bpy.context.scene.collection.objects.link(occluder)
+    bpy.context.view_layer.update()
+    stack_layer.depth = extension.projection.depth_image(bpy.context, stack_layer)
+    stack_layer['depth_tolerance'] = 2.0
+    stack_layer.mirror = 'X_PLUS'
+    extension.projection.build_material(obj.active_material)
+    occluder.hide_render = True
+    stack_layer.image.pixels.foreach_set(array('f', (0.1, 0.1, 0.9, 1)) * (128 * 128))
+    stack_layer.image.update()
+    mirrored = render_pixels(bpy, directory / "mirrored.exr")
+    # The right quad keeps the original red slot material in this fixture, so
+    # the check is the folded half: both sample points fold onto twin regions
+    # covered by the occluder in the snapshot yet must stay painted.
+    assert pixel(mirrored, 32, 64)[2] > 0.5 and pixel(mirrored, 32, 64)[0] < 0.05, pixel(mirrored, 32, 64)
+    assert pixel(mirrored, 48, 64)[2] > 0.5, pixel(mirrored, 48, 64)
+    stack_layer.mirror = 'NONE'
+    stack_layer['depth_tolerance'] = 0.01
+    stack_layer.image.pixels.foreach_set(array('f', (0.1, 0.7, 0.2, 1)) * (128 * 128))
+    stack_layer.image.update()
+    occluder.hide_render = False
+    stack_layer.depth = extension.projection.depth_image(bpy.context, stack_layer)
+    extension.projection.build_material(obj.active_material)
+    bpy.data.objects.remove(occluder, do_unlink=True)
+    bpy.data.meshes.remove(bpy.data.meshes['Mirror occluder'])
+    bpy.context.view_layer.update()
     bpy.ops.wm.save_as_mainfile(filepath=str(directory / "projection.blend"))
     print(f"PROJECTION RENDER CHECKS PASSED ({engine})")
 
