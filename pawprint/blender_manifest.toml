@@ -1,0 +1,17 @@
+schema_version = "1.0.0"
+id = "pawprint"
+version = "0.2.0"
+name = "Pawprint"
+tagline = "Viewpoint-bound texture layers with a ComfyUI workflow"
+maintainer = "Pawprint contributors"
+type = "add-on"
+tags = ["Material", "Paint"]
+blender_version_min = "5.0.0"
+license = ["SPDX:GPL-3.0-or-later"]
+
+[permissions]
+network = "Connect to the configured ComfyUI server for image generation"
+files = "Exchange temporary images with the generation worker"
+
+[build]
+paths_exclude_pattern = ["__pycache__/", "*.pyc", ".*", "*.zip"]
