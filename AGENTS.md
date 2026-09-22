@@ -55,9 +55,11 @@ QwenImageDiffsynthControlnet DiffSynth patch with the Fun ControlNet Union
 weights, ModelSamplingAuraFlow shift 3 flow, CLIPLoader qwen_3_4b lumina2 +
 CLIPSetLastLayer/CLIPTextEncode + ConditioningZeroOut negative at CFG 1, steps 8
 res_multistep/simple denoise 1.0; selections run a reference inpainting pipeline —
-denoise 1.0 pre-fills with a MAT inpaint model and steers ZImageFunControlnet in
-inpaint mode, lower denoise refines the original latent through SplitSigmas, both
-wrap DifferentialDiffusion, sample via the BasicGuider/BasicScheduler/
+ZImageFunControlnet steers in inpaint mode at every denoise (depth guidance and
+control strength stay effective during refinement), denoise 1.0 additionally
+pre-fills with a MAT inpaint model while lower denoise refines the original
+latent through SplitSigmas, both wrap DifferentialDiffusion, sample via the
+BasicGuider/BasicScheduler/
 SamplerCustomAdvanced stack and finish with INPAINT_ColorMatch; no selection uses
 VAEEncode + SetLatentNoiseMask whole-frame with AuraFlow/KSampler; plain prompts,
 no instruction wrapping; shared batch review). backend.py

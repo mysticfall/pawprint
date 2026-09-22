@@ -464,14 +464,18 @@ class BackendTest(unittest.TestCase):
         self.assertIsNone(graph['45']['inputs']['image'])
         self.assertEqual(graph['45']['inputs']['model'], ['30', 0])
         # Below full denoise the pipeline refines the existing pixels: no
-        # pre-fill and no Fun ControlNet; the latent encodes the original
-        # composite and the sigma schedule drops its strongest step.
-        refine = dict(zit, loras=[], denoise=0.6, depth_enabled=False)
+        # pre-fill, but the Fun ControlNet keeps steering the refinement, so
+        # depth guidance and Control strength stay effective at any denoise;
+        # the sigma schedule still drops its strongest step.
+        refine = dict(zit, loras=[], denoise=0.6)
         backend.validate(refine, caps)
-        graph = backend.workflow(refine, 'in.png', 'mask.png', None, caps=caps)
-        for key in ('12', '28', '33', '42', '43', '44', '45'):
+        graph = backend.workflow(refine, 'in.png', 'mask.png', 'depth.png', caps=caps)
+        for key in ('28', '33', '42', '43'):
             self.assertNotIn(key, graph)
-        self.assertEqual(graph['25']['inputs']['model'], ['30', 0])
+        self.assertEqual(graph['45']['inputs']['model'], ['30', 0])
+        self.assertEqual(graph['45']['inputs']['image'], ['12', 0])
+        self.assertEqual(graph['45']['inputs']['mask'], ['26', 0])
+        self.assertEqual(graph['25']['inputs']['model'], ['45', 0])
         self.assertEqual(graph['46']['inputs']['pixels'], ['36', 0])
         self.assertEqual(graph['47']['inputs']['mask'], ['26', 0])
         self.assertEqual(graph['52']['inputs']['denoise'], 0.6)
@@ -480,6 +484,9 @@ class BackendTest(unittest.TestCase):
         self.assertEqual(graph['55']['inputs']['sigmas'], ['53', 1])
         self.assertEqual(graph['56']['inputs']['reference'], ['36', 0])
         self.assertEqual(graph['56']['inputs']['exclude_mask'], ['26', 0])
+        # Refine selections validate the ControlNet patch like full-denoise ones.
+        with self.assertRaisesRegex(ValueError, 'ControlNet patch'):
+            backend.validate(dict(refine, zit_controlnet='missing.safetensors'), caps)
         # Without a selection the whole frame updates through the plain
         # img2img latent: VAE encode plus a whole-frame noise mask.
         graph = backend.workflow(dict(zit, loras=[], masked=False),

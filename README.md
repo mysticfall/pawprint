@@ -201,10 +201,11 @@ materials are not baked into the initial gray base.
          them completely) while the surrounding context conditions each step for a
          seamless blend and the server returns the original pixels outside the
          selection exactly. With Z Image Turbo, selections run a reference inpainting
-         pipeline: at denoise 1.0 the region is pre-filled by a dedicated MAT inpaint
-         model and steered by the Fun ControlNet in inpaint mode, and at lower denoise
-         the original latent is refined from a softened sigma schedule — both paths
-         finish with an `INPAINT_ColorMatch` step so the repaired pixels blend with
+         pipeline: the Fun ControlNet steers every selection in inpaint mode
+         (optionally with a depth image), at denoise 1.0 the region is
+         additionally pre-filled by a dedicated MAT inpaint model, and at lower
+         denoise the original latent is refined from a softened sigma schedule —
+         all paths finish with an `INPAINT_ColorMatch` step so the repaired pixels blend with
          the surrounding context, while the client-side feathered stencil keeps every
          unselected pixel exact. **Clear**
         means unrestricted generation over the full image as ordinary img2img; the

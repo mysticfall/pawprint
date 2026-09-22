@@ -249,10 +249,10 @@ def validate(settings, caps):
                 raise ValueError(f"{spec['name']} is not available on this server: {value}")
             if 'min' in spec and not spec['min'] <= value <= spec.get('max', value):
                 raise ValueError(f"{spec['name']} must be at least {spec['min']}")
-        # Depth guidance and full-denoise inpainting both need the DiffSynth
-        # patch pair; full-denoise inpainting additionally needs a pre-fill
-        # inpaint model.
-        if (settings.get('depth_enabled') or (settings.get('masked') and settings.get('denoise', 1.0) >= 1.0)) \
+        # The Fun ControlNet runs for every masked request (and for unmasked
+        # depth guidance); full-denoise inpainting additionally needs a
+        # pre-fill inpaint model.
+        if (settings.get('masked') or settings.get('depth_enabled')) \
                 and settings['zit_controlnet'] not in caps['zit_controlnets']:
             raise ValueError(f"ControlNet patch is not available on this server: {settings['zit_controlnet']}")
         if settings.get('masked') and settings.get('denoise', 1.0) >= 1.0 and not caps.get('zit_inpaint'):
@@ -380,10 +380,11 @@ def _zit_workflow(settings, image, mask, depth=None, caps=None):
                           lora_name=lora['name'], strength_model=lora['strength'])
         model = [key, 0]
     if settings.get('masked'):
-        # Selections follow the confirmed external reference pipelines. At full
-        # denoise a dedicated inpaint model pre-fills the selection and the Fun
-        # ControlNet runs in inpaint mode, feeding the surrounding context to
-        # the sampler; below full denoise the original pixels refine directly
+        # Selections follow the confirmed external reference pipelines. The
+        # Fun ControlNet always runs in inpaint mode, feeding the surrounding
+        # context (plus an optional depth image) to the sampler. At full
+        # denoise a dedicated inpaint model additionally pre-fills the
+        # selection; below full denoise the original pixels refine directly
         # with a softened sigma schedule. Both paths re-match colors against
         # their reference outside the selection.
         full = settings['denoise'] >= 1.0
@@ -391,11 +392,13 @@ def _zit_workflow(settings, image, mask, depth=None, caps=None):
         graph['26'] = node('INPAINT_ExpandMask', mask=['4', 0], grow=feather,
                            blur=int(feather * 1.7), blur_type='linear')
         noise_mask = exclude = ['26', 0]
+        control_mask = ['26', 0]
         reference = ['36', 0]
         if full:
             graph['27'] = node('INPAINT_StabilizeMask', mask=['26', 0], epsilon=0.01)
             graph['28'] = node('ThresholdMask', mask=['27', 0], value=0.0)
             noise_mask = exclude = ['27', 0]
+            control_mask = ['28', 0]
             graph['33'] = node('INPAINT_ExpandMask', mask=['4', 0], grow=4, blur=0,
                                blur_type='gaussian')
             graph['42'] = node('INPAINT_LoadInpaintModel',
@@ -403,17 +406,17 @@ def _zit_workflow(settings, image, mask, depth=None, caps=None):
             graph['43'] = node('INPAINT_InpaintWithModel', inpaint_model=['42', 0],
                                image=['36', 0], mask=['33', 0], seed=int(settings['seed']))
             reference = ['43', 0]
-            graph['44'] = node('ModelPatchLoader', name=settings['zit_controlnet'])
-            control_image = None
-            if settings.get('depth_enabled'):
-                if depth is None:
-                    raise ValueError('Depth guidance image is missing')
-                graph['12'] = node('LoadImage', image=depth)
-                control_image = ['12', 0]
-            graph['45'] = node('ZImageFunControlnet', model=model, model_patch=['44', 0],
-                               vae=['35', 0], image=control_image, inpaint_image=['36', 0],
-                               mask=['28', 0], strength=settings['zit_strength'])
-            model = ['45', 0]
+        graph['44'] = node('ModelPatchLoader', name=settings['zit_controlnet'])
+        control_image = None
+        if settings.get('depth_enabled'):
+            if depth is None:
+                raise ValueError('Depth guidance image is missing')
+            graph['12'] = node('LoadImage', image=depth)
+            control_image = ['12', 0]
+        graph['45'] = node('ZImageFunControlnet', model=model, model_patch=['44', 0],
+                           vae=['35', 0], image=control_image, inpaint_image=['36', 0],
+                           mask=control_mask, strength=settings['zit_strength'])
+        model = ['45', 0]
         graph['25'] = node('DifferentialDiffusion', model=model)
         model = ['25', 0]
         graph['46'] = node('VAEEncode', pixels=reference, vae=['35', 0])

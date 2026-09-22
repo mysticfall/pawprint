@@ -352,16 +352,18 @@ choices (no code reused):
   samples at CFG 1, so the negative prompt field has no effect for ZIT.
 - **Selections use the reference inpainting pipeline.** A selection runs a
   dual-path workflow modelled on the user's known-working reference: the uploaded
-  mask is expanded (`INPAINT_ExpandMask`, grow = the layer's feather value, linear
-  blur) into the generation mask. At denoise 1.0 the region is first pre-filled by
-  a dedicated MAT inpaint model (`INPAINT_LoadInpaintModel` + 
-  `INPAINT_InpaintWithModel`, auto-picked from the server list like the CLIP/VAE),
-  then the Fun ControlNet patch runs in inpaint mode (`ZImageFunControlnet` with
-  `inpaint_image` + binarised mask, depth image optional) so the surrounding
-  context steers generation, and the pre-filled pixels are encoded as the latent.
-  Below denoise 1.0 the original composite is encoded directly (no pre-fill, no
-  ControlNet) and `SplitSigmas` drops the strongest sigma for a softer refinement.
-  Both paths wrap the model in `DifferentialDiffusion`, sample through the
+   mask is expanded (`INPAINT_ExpandMask`, grow = the layer's feather value, linear
+   blur) into the generation mask. The Fun ControlNet patch runs in inpaint mode
+   (`ZImageFunControlnet` with `inpaint_image` + the mask — binarised at full
+   denoise, the expanded feather mask below — and an optional depth image) at
+   every denoise, so context, depth guidance and Control strength stay effective
+   during refinement. At denoise 1.0 the region is additionally pre-filled by
+   a dedicated MAT inpaint model (`INPAINT_LoadInpaintModel` +
+   `INPAINT_InpaintWithModel`, auto-picked from the server list like the CLIP/VAE)
+   and the pre-filled pixels are encoded as the latent.
+   Below denoise 1.0 the original composite is encoded directly (no pre-fill)
+   and `SplitSigmas` drops the strongest sigma for a softer refinement.
+   Both paths wrap the model in `DifferentialDiffusion`, sample through the
   advanced stack (`RandomNoise`/`KSamplerSelect`/`BasicScheduler`/`BasicGuider`/
   `SamplerCustomAdvanced`) and finish with `INPAINT_ColorMatch` (against the
   pre-fill at full denoise, the original below) using the expanded mask as
@@ -386,10 +388,11 @@ advertises `zit_unets` (UNETLoader list), `zit_loras` (names containing `zit` or
 `zit_inpaint` (the MAT-style inpaint model; combos in both the classic options-list
 and the newer `[type, config]` object_info shapes are understood); the CLIP
 (`qwen_3` token) and VAE (`ae` token) names are resolved automatically. Validation
-rejects ZIT requests on servers without those nodes, without the chosen unet,
-without an available ControlNet patch when depth guidance is enabled or a
-selection runs at denoise 1.0, and without an inpaint model for full-denoise
-selections. The
+   rejects ZIT requests on servers without those nodes, without the chosen unet,
+   without an available ControlNet patch when depth guidance is enabled or any
+   selection runs (masked requests use the patch at every denoise), and without
+   an inpaint model for full-denoise
+   selections. The
 Guidance panel for ZIT layers offers the depth toggle, patch picker and Control
 strength instead of the SDXL stack; reference guidance is future work.
 

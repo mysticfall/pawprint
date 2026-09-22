@@ -1,6 +1,31 @@
 # Scope and validation
 
-## Current slice: mirror-aware occlusion (version unchanged at 0.2.0)
+## Current slice: ZIT refine ControlNet (version unchanged at 0.2.0)
+
+The user suspected: "I have a feeling that control net only works with
+denoising strength of 1.0 with a ZIT workflow. Can you check if this is the
+case indeed?" — confirmed: the masked refine path (denoise below 1.0) built the
+ControlNet patch nodes only inside the full-denoise branch, silently ignoring
+the depth toggle and Control strength, while the unmasked path applied depth
+guidance at any denoise. The user approved the fix: "Yes, let's fix this
+problem."
+
+`_zit_workflow` now runs `ModelPatchLoader` + `ZImageFunControlnet` for every
+masked request: the Fun ControlNet steers in inpaint mode (context plus the
+optional depth image) at every denoise, the binarised stabilized mask drives it
+at full denoise and the expanded feather mask below, and the MAT pre-fill stays
+full-denoise-only. The `validate` gate requires a ControlNet patch whenever a
+selection runs (or unmasked depth guidance is enabled); the inpaint model gate
+remains full-denoise-only.
+
+Verified on ComfyUI 0.37.0: `python3 tools/backend_test.py` (12 tests, including
+the rewritten refine block asserting nodes 44/45/25 wiring, the expanded-mask
+control input, SplitSigmas and the new missing-patch rejection), plus a
+standalone live refine probe at denoise 0.6 with depth guidance that ran
+end-to-end; the server history shows `ZImageFunControlnet` with image `['12',0]`
+mask `['26',0]` and `SplitSigmas` active.
+
+## Previous slice: mirror-aware occlusion (version unchanged at 0.2.0)
 
 The user reported: "I found a regression. We tried to improve the projection
 algorithm so that it doesn't bleed to the invisible side obstructed by the mesh.
