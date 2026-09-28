@@ -91,7 +91,16 @@ input crop used by Generate without requiring ComfyUI. Commit Through Selected
 to Base bakes the bottom contiguous group into a new packed base copy at the
 scene-configured base resolution (default 2048², no upper limit; existing base
 content resampled) with one-step undo; an optional per-stack Keep keeps the
-committed sources hidden instead of removing them. Merge down and composite
+committed sources hidden instead of removing them. A derived PBR slice is in:
+Estimate Albedo & Normal bakes the visible stack into a temporary UV composite,
+runs the tiled Chord workflow on ComfyUI (albedo + normal only; roughness and
+metalness stay unconnected), and applies packed maps into a separate
+Pawprint PBR material paired with the stack via a pawprint_source
+back-reference; a Generation/Material view toggle swaps the slot material and
+material view blocks all editing operators (active_stack resolves to None).
+Re-estimates reuse the same material/nodes/map datablocks in place —
+remove+rename image swaps scramble node-image pointers across memfile undo.
+Merge down and composite
 depth remain future slices. Geometry is the agreed default depth source.
 Existing single-projection data migrates on load/reload.
 
@@ -112,9 +121,11 @@ Existing single-projection data migrates on load/reload.
 - `pawprint/result.py`: native clone result application and paint-setting restoration.
 - `pawprint/generation.py`: discovery, per-request ownership, async process lifecycle/UI operators.
 - `pawprint/baking.py`: slot-isolated Cycles emission bake and commit-through-selected operator.
+- `pawprint/pbr.py`: derived PBR material build/rebuild, Chord estimate/apply operators and the view-mode slot swap.
 - `tools/backend_test.py`: fake-server errors, capabilities and owned cancellation checks.
 - `tools/generation_test.py`: live shipped-operator capture/apply/undo and stale-target checks.
 - `tools/baking_test.py`: isolated UV commit bake, one-step undo/redo, interleave and persistence checks.
+- `tools/pbr_probe.py`: isolated composite bake, PBR build/rebuild wiring, view-mode gate, apply/stale rejection and pointer-cycle persistence checks.
 - `tools/smoke_test.py`: isolated Blender registration/reload smoke check.
 - `tools/projection_test.py`: isolated Cycles/Eevee render and persistence checks.
 - `tools/image_undo_probe.py`: direct-pixel/global-undo feasibility probe.

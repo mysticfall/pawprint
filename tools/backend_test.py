@@ -52,6 +52,17 @@ class BackendTest(unittest.TestCase):
                         'status': {'status_str': 'success', 'completed': True},
                         'outputs': {'10': {'images': [
                             {'filename': 'result.png', 'subfolder': '', 'type': 'temp'}]}}}})
+                elif owner.mode in ('batch', 'batch_cancel', 'estimate') and self.path.startswith('/view'):
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(b'png bytes')
+                elif owner.mode == 'estimate' and self.path.startswith('/history/'):
+                    self.respond({self.path[len('/history/'):]: {
+                        'status': {'status_str': 'success', 'completed': True},
+                        'outputs': {
+                            '10': {'images': [{'filename': 'basecolor.png', 'subfolder': '', 'type': 'temp'}]},
+                            '11': {'images': [{'filename': 'normal.png', 'subfolder': '', 'type': 'temp'}]},
+                        }}})
                 elif owner.mode in ('batch', 'batch_cancel') and self.path.startswith('/view'):
                     self.send_response(200)
                     self.end_headers()
@@ -622,6 +633,72 @@ class BackendTest(unittest.TestCase):
         self.assertFalse(self.directory.exists())
         deletes = [body for _, path, body in self.calls if path == '/queue']
         self.assertEqual(deletes[-1:], [{'delete': ['own-prompt-1', 'own-prompt-2']}])
+        self.assertFalse(any(path == '/interrupt' for _, path, _ in self.calls))
+
+
+    def test_estimate_downloads_both_maps_without_mask(self):
+        # Estimation is a separate operation: one upload (the composite), one
+        # prompt, both map outputs collected, no queue cleanup afterwards.
+        for name, payload in {name: {} for name in backend.CHORD_REQUIRED}.items():
+            self.info[name] = payload
+        # New-style combo serialization: ['COMBO', {'options': [...]}].
+        self.info['ChordLoadModel'] = {'input': {'required': {'ckpt_name': [
+            'COMBO', {'options': ['sdxl_base.safetensors', 'chord_v1.safetensors']}]}}}
+        caps = backend.capabilities(self.info)
+        self.assertEqual(caps['chord'], 'chord_v1.safetensors')
+        self.mode = 'estimate'
+        settings = dict(chord='chord_v1.safetensors', tile=1024, overlap=128)
+        backend.publish(self.directory, 'request.json', dict(operation='estimate', settings=settings,
+                        server=f'http://127.0.0.1:{self.server.server_port}'))
+        backend.run(self.directory)
+        self.assertEqual(sum(path == '/upload/image' for _, path, _ in self.calls), 1)
+        self.assertEqual(sum(path == '/prompt' for _, path, _ in self.calls), 1)
+        self.assertFalse(any(path == '/queue' for _, path, _ in self.calls))
+        self.assertEqual((self.directory / 'result-basecolor.png').read_bytes(), b'png bytes')
+        self.assertEqual((self.directory / 'result-normal.png').read_bytes(), b'png bytes')
+        self.assertEqual(json.loads((self.directory / 'done.json').read_text())['maps'],
+                         ['result-basecolor.png', 'result-normal.png'])
+        graph = next(body['prompt'] for _, path, body in self.calls if path == '/prompt')
+        self.assertEqual(len(graph), 9)
+        self.assertEqual(graph['1'], {'class_type': 'ChordLoadModel',
+                                      'inputs': {'ckpt_name': 'chord_v1.safetensors'}})
+        self.assertEqual(graph['13'], {'class_type': 'GetImageSize', 'inputs': {'image': ['2', 0]}})
+        self.assertEqual(graph['7'], {'class_type': 'SplitImageToTileList',
+                                      'inputs': {'image': ['2', 0], 'tile_width': 1024,
+                                                 'tile_height': 1024, 'overlap': 128}})
+        self.assertEqual(graph['20'], {'class_type': 'ChordMaterialEstimation',
+                                       'inputs': {'chord_model': ['1', 0], 'image': ['7', 0]}})
+        for key, slot in (('8', 0), ('9', 1)):
+            self.assertEqual(graph[key], {'class_type': 'ImageMergeTileList',
+                                          'inputs': {'image_list': ['20', slot], 'overlap': 128,
+                                                     'final_width': ['13', 0], 'final_height': ['13', 1]}})
+        self.assertEqual(graph['10'], {'class_type': 'PreviewImage', 'inputs': {'images': ['8', 0]}})
+        self.assertEqual(graph['11'], {'class_type': 'PreviewImage', 'inputs': {'images': ['9', 0]}})
+
+    def test_estimate_without_chord_model_fails_before_upload(self):
+        caps = backend.capabilities(self.info)
+        self.assertIsNone(caps['chord'])
+        backend.publish(self.directory, 'request.json',
+                        dict(operation='estimate', settings=dict(chord='chord_v1.safetensors', tile=1024,
+                                                                 overlap=128),
+                             server=f'http://127.0.0.1:{self.server.server_port}'))
+        backend.run(self.directory)
+        self.assertIn('Chord', json.loads((self.directory / 'done.json').read_text())['error'])
+        self.assertFalse(any(method == 'POST' for method, _, _ in self.calls))
+
+    def test_estimate_cancellation_deletes_only_own_prompt(self):
+        for name in backend.CHORD_REQUIRED:
+            self.info[name] = {'input': {'required': {'ckpt_name': [['chord_v1.safetensors']]}}} \
+                if name == 'ChordLoadModel' else {}
+        self.mode = 'cancel'
+        backend.publish(self.directory, 'request.json',
+                        dict(operation='estimate', settings=dict(chord='chord_v1.safetensors', tile=1024,
+                                                                 overlap=128),
+                             server=f'http://127.0.0.1:{self.server.server_port}'))
+        backend.run(self.directory)
+        self.assertFalse(self.directory.exists())
+        deletes = [body for _, path, body in self.calls if path == '/queue']
+        self.assertEqual(deletes, [{'delete': ['own-prompt']}])
         self.assertFalse(any(path == '/interrupt' for _, path, _ in self.calls))
 
 

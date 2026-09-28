@@ -41,6 +41,19 @@ def status():
     return _status
 
 
+def set_status(text):
+    global _status
+    _status = text
+
+
+def chord_ready():
+    return bool(_capabilities and _capabilities.get('chord'))
+
+
+def chord_model():
+    return (_capabilities or {}).get('chord')
+
+
 def connected(context):
     return _capabilities is not None and _server == context.scene.pawprint_server.rstrip('/')
 
@@ -248,6 +261,19 @@ def target_matches(context, job):
                 and fingerprint(layer) == job['fingerprint'])
 
 
+def estimate_target_matches(context, job):
+    """Per-tick guard for estimation: structure only, pixels at completion."""
+    if (context.scene.as_pointer() != job['scene'] or context.view_layer.name != job['view_layer']
+            or painting.active() or context.active_object is None
+            or context.active_object.as_pointer() != job['owner'] or context.object.mode != 'OBJECT'
+            or context.object.active_material_index != job['slot']
+            or model.in_material_view(context) is not None):
+        return False
+    stack = model.active_stack(context)
+    return bool(stack and stack.id_data.as_pointer() == job['material']
+                and model.fingerprint_stack(stack) == job['fingerprint'])
+
+
 def tick():
     global _job, _status, _capabilities, _server
     for old in _retired[:]:
@@ -270,12 +296,15 @@ def tick():
             if job['operation'] == 'generate' and not target_matches(bpy.context, job):
                 cancel('Cancelled: target layer, image or selection changed')
                 return 0.25
+            if job['operation'] == 'estimate' and not estimate_target_matches(bpy.context, job):
+                cancel('Cancelled: target stack, slot or view changed')
+                return 0.25
             queued = job['directory'] / 'queued.json'
             if queued.exists():
                 prompt_id = json.loads(queued.read_text())['prompt_id']
                 _status = 'ComfyUI queued/running: ' + prompt_id[:8]
             progress = job['directory'] / 'progress.json'
-            if progress.exists():
+            if progress.exists() and job['operation'] != 'estimate':
                 data = json.loads(progress.read_text())
                 _status = f"Generated {data['done']}/{data['total']} candidates…"
             if job['process'].poll() is None:
@@ -296,7 +325,14 @@ def tick():
                     for value in _capabilities[name]:
                         entries.add().name = value
                 _status = (f"Connected: {len(_capabilities['checkpoints'])} SDXL checkpoints, "
-                           f"{len(_capabilities['zit_unets'])} Z models")
+                           f"{len(_capabilities['zit_unets'])} Z models"
+                           + (', Chord ready' if _capabilities.get('chord') else ''))
+            elif job['operation'] == 'estimate':
+                from . import pbr
+                # begin_apply loads the maps before tick's cleanup removes
+                # the job directory; the apply operator owns undo.
+                pbr.begin_apply(job)
+                _status = f"Estimated PBR maps · {job['settings']['chord']}"
             else:
                 layer = model.active_layer(model.active_stack(bpy.context))
                 if digest(layer.image) != job['digest']:

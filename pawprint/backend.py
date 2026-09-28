@@ -129,6 +129,10 @@ def _basename(name):
 
 
 def _prefer(names, token):
+    # A bare string here is a serialized type name ('COMBO'), not an option
+    # list; indexing it would silently yield a single character.
+    if isinstance(names, str):
+        return None
     matches = [name for name in names if token in _basename(name).lower()]
     return matches[0] if matches else (names[0] if names else None)
 
@@ -167,6 +171,13 @@ ZIT_REQUIRED = {'UNETLoader', 'CLIPLoader', 'VAELoader', 'CLIPSetLastLayer', 'CL
 # Fun ControlNet apply covers inpaint mode (ZImageFunControlnet) and depth
 # guidance (QwenImageDiffsynthControlnet).
 ZIT_CONTROLNET_NODES = {'ModelPatchLoader', 'QwenImageDiffsynthControlnet', 'ZImageFunControlnet'}
+# Chord material estimation (ComfyUI-Chord): tiled basecolor/normal estimation
+# from a flat composite. Missing Chord nodes only disable estimation; they
+# never block the generation adapters.
+CHORD_REQUIRED = {'ChordLoadModel', 'ChordMaterialEstimation', 'SplitImageToTileList',
+                  'ImageMergeTileList', 'GetImageSize', 'PreviewImage'}
+# Estimate output nodes and the client-side files their images land in.
+CHORD_OUTPUTS = {'10': 'result-basecolor.png', '11': 'result-normal.png'}
 
 
 def encoder_for(model):
@@ -191,6 +202,10 @@ def capabilities(info):
     caps['samplers'] = caps['schedulers'] = []
     caps['ranges'] = {}
     caps['zit_clip'] = caps['zit_vae'] = None
+    caps['chord'] = None
+    if not (CHORD_REQUIRED - info.keys()):
+        caps['chord'] = _prefer(_combo_options(
+            info['ChordLoadModel']['input']['required']['ckpt_name']), 'chord')
     if not sdxl_missing:
         caps['checkpoints'] = info['CheckpointLoaderSimple']['input']['required']['ckpt_name'][0]
         installed = info['ControlNetLoader']['input']['required']['control_net_name'][0] \
@@ -522,6 +537,33 @@ def workflow(settings, image, mask, depth=None, reference=None, caps=None):
     return _sdxl_workflow(settings, image, mask, depth, reference, caps=caps)
 
 
+def _chord_workflow(settings, image):
+    """Tiled Chord estimation of albedo and normal maps from a flat composite.
+
+    Follows the user's reference workflow ("Tiled Chord"): the input is split
+    into overlapping tiles, ChordMaterialEstimation internally works at 1024²
+    with circular padding, and the merged maps return at the input size. The
+    roughness/metalness outputs stay unconnected by decision.
+    """
+    def node(kind, **inputs):
+        return dict(class_type=kind, inputs=inputs)
+    return {
+        '1': node('ChordLoadModel', ckpt_name=settings['chord']),
+        '2': node('LoadImage', image=image),
+        '13': node('GetImageSize', image=['2', 0]),
+        '7': node('SplitImageToTileList', image=['2', 0],
+                  tile_width=settings['tile'], tile_height=settings['tile'],
+                  overlap=settings['overlap']),
+        '20': node('ChordMaterialEstimation', chord_model=['1', 0], image=['7', 0]),
+        '8': node('ImageMergeTileList', image_list=['20', 0], overlap=settings['overlap'],
+                  final_width=['13', 0], final_height=['13', 1]),
+        '9': node('ImageMergeTileList', image_list=['20', 1], overlap=settings['overlap'],
+                  final_width=['13', 0], final_height=['13', 1]),
+        '10': node('PreviewImage', images=['8', 0]),
+        '11': node('PreviewImage', images=['9', 0]),
+    }
+
+
 class Client:
     def __init__(self, url):
         if parse.urlsplit(url).scheme not in {'http', 'https'}:
@@ -562,6 +604,7 @@ def publish(directory, name, value):
 def run(directory):
     """Own just these prompts. Cancellation never interrupts a shared running job."""
     prompt_ids = []
+    expected = []
     client = None
     try:
         config = json.loads((directory / 'request.json').read_text())
@@ -573,6 +616,42 @@ def run(directory):
             publish(directory, 'done.json', dict(capabilities=caps))
             return
         settings = config['settings']
+        if config['operation'] == 'estimate':
+            # Estimation is not an adapter request: its settings carry only the
+            # Chord model and tiling, there is no mask, and both map outputs
+            # must arrive before the job counts as complete.
+            if not caps.get('chord'):
+                raise ValueError('No Chord model found on this server')
+            image = client.upload(directory / 'input.png')
+            if (directory / 'cancel').exists():
+                return
+            graph = _chord_workflow(settings, image)
+            prompt_id = client.post('/prompt', json.dumps({'prompt': graph}).encode())['prompt_id']
+            prompt_ids.append(prompt_id)
+            expected.extend(CHORD_OUTPUTS.values())
+            publish(directory, 'queued.json', dict(prompt_id=prompt_id))
+            deadline = time.monotonic() + 1200
+            while time.monotonic() < deadline and not (directory / 'cancel').exists():
+                history = json.loads(client.get('/history/' + parse.quote(prompt_id))).get(prompt_id)
+                if history:
+                    status = history.get('status', {})
+                    if status.get('status_str') == 'error':
+                        raise RuntimeError(str(status.get('messages', status)))
+                    outputs = history.get('outputs', {})
+                    if all(outputs.get(node, {}).get('images') for node in CHORD_OUTPUTS):
+                        for node_id, filename in CHORD_OUTPUTS.items():
+                            (directory / filename).write_bytes(
+                                client.get('/view?' + parse.urlencode(outputs[node_id]['images'][0])))
+                        publish(directory, 'progress.json', dict(done=1, total=1))
+                        break
+                    if status.get('completed'):
+                        raise RuntimeError('ComfyUI completed without the material maps')
+                time.sleep(0.5)
+            else:
+                if not (directory / 'cancel').exists():
+                    raise TimeoutError(f'Prompt {prompt_id} exceeded 20 minutes; running output will be discarded')
+            publish(directory, 'done.json', dict(maps=list(CHORD_OUTPUTS.values())))
+            return
         validate(settings, caps)
         if (directory / 'cancel').exists():
             return
@@ -595,6 +674,8 @@ def run(directory):
             graph = workflow(dict(settings, seed=seed), image, mask, depth, reference, caps)
             prompt_id = client.post('/prompt', json.dumps({'prompt': graph}).encode())['prompt_id']
             prompt_ids.append(prompt_id)
+            name = 'result.png' if len(seeds) == 1 else f'result-{index}.png'
+            expected.append(name)
             if len(seeds) == 1:
                 publish(directory, 'queued.json', dict(prompt_id=prompt_id))
             deadline = time.monotonic() + 1200
@@ -606,7 +687,6 @@ def run(directory):
                         raise RuntimeError(str(status.get('messages', status)))
                     images = history.get('outputs', {}).get('10', {}).get('images', [])
                     if images:
-                        name = 'result.png' if len(seeds) == 1 else f'result-{index}.png'
                         (directory / name).write_bytes(client.get('/view?' + parse.urlencode(images[0])))
                         publish(directory, 'progress.json', dict(done=index + 1, total=len(seeds)))
                         break
@@ -620,9 +700,7 @@ def run(directory):
     except Exception as exc:
         publish(directory, 'done.json', dict(error=str(exc)))
     finally:
-        complete = all((directory / ('result.png' if len(prompt_ids) == 1
-                                     else f'result-{index}.png')).exists()
-                       for index in range(len(prompt_ids)))
+        complete = all((directory / name).exists() for name in expected)
         if client and prompt_ids and ((directory / 'cancel').exists() or not complete):
             try:
                 client.post('/queue', json.dumps({'delete': prompt_ids}).encode())

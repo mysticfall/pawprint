@@ -7,8 +7,8 @@ import bmesh
 from . import model, projection, painting, generation
 
 
-def bake_base(context, stack, last):
-    """Return a packed replacement base; leave all original pixels/data untouched."""
+def _bake(context, stack, last, name):
+    """Bake through layer ``last`` into a fresh packed image; originals untouched."""
     owner = context.object
     base = stack.base
     if not base or base.source not in {'FILE', 'GENERATED'} or min(base.size) < 1:
@@ -47,7 +47,7 @@ def bake_base(context, stack, last):
         # Copy rather than overwrite: reference replacement + layer removal is
         # ordinary datablock undo, independent of direct image-pixel undo.
         image = base.copy()
-        image.name = 'Pawprint Committed Base'
+        image.name = name
         image.filepath_raw = ''
         image.use_fake_user = False
         # Resample to the configured base resolution; Image.scale keeps content.
@@ -95,6 +95,20 @@ def bake_base(context, stack, last):
             bpy.data.scenes.remove(scene)
         if image and not success:
             bpy.data.images.remove(image)
+
+
+def bake_base(context, stack, last):
+    """Return a packed replacement base; leave all original pixels/data untouched."""
+    return _bake(context, stack, last, 'Pawprint Committed Base')
+
+
+def bake_composite(context, stack):
+    """Bake the base and every layer through the top of the stack.
+
+    The whole-stack composite feeds PBR estimation; an empty layer stack is
+    valid input (the base alone is estimated).
+    """
+    return _bake(context, stack, len(stack.layers) - 1, 'Pawprint Material Composite')
 
 
 class PAWPRINT_OT_commit_base(bpy.types.Operator):

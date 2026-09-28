@@ -410,6 +410,7 @@ python3 tools/projection_test.py
 python3 tools/baking_test.py
 # Native paint undo interleaved with the commit's undo step:
 python3 tools/baking_test.py --interactive
+python3 tools/pbr_probe.py
 blender --background --factory-startup --python-exit-code 1 --python tools/image_undo_probe.py
 # Or select another Blender installation:
 python3 tools/smoke_test.py --blender /path/to/blender

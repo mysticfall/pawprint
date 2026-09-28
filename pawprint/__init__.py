@@ -11,9 +11,9 @@ elif globals().get("ui") is not None:
     import importlib
     importlib.reload(globals()["ui"])
 
-from . import backend, model, projection, operators, overlay, painting, selection, capture, result, generation, baking, ui
+from . import backend, model, projection, operators, overlay, painting, selection, capture, result, generation, baking, pbr, ui
 
-_MODULES = (backend, model, projection, operators, overlay, painting, selection, capture, result, generation, baking, ui)
+_MODULES = (backend, model, projection, operators, overlay, painting, selection, capture, result, generation, baking, pbr, ui)
 
 
 def register():
@@ -23,16 +23,18 @@ def register():
     selection.register()
     generation.register()
     baking.register()
+    pbr.register()
     ui.register()
     overlay.register()
 
 
 def unregister():
+    ui.unregister()
+    pbr.unregister()
     baking.unregister()
     generation.unregister()
     painting.unregister()
     selection.unregister()
     overlay.unregister()
-    ui.unregister()
     operators.unregister()
     model.unregister()

@@ -610,7 +610,41 @@ Verified on Blender 5.2.2 LTS / ComfyUI 0.36.0:
 Reference-image influence/quality, weight-type variants (style transfer etc.),
 multi-image references, LoRA stacks and edge controls remain later slices.
 
-## Current slice: configurable base resolution and source-preserving commits (version unchanged at 0.2.0)
+## Current slice: derived PBR material estimation and view modes (version unchanged at 0.2.0)
+
+**Estimate Albedo & Normal** bakes the visible stack into a temporary UV
+composite (reusing the commit bake), sends it through the tiled Chord
+workflow on ComfyUI (albedo + normal only; 1024²/128px tiles,
+`chord_v1.safetensors` discovered from the server's ChordLoadModel combo),
+and applies the maps into a separate **Pawprint PBR** material on the stack —
+packed `Pawprint Albedo`/`Pawprint Normal` datablocks wired to a Principled
+BSDF via UV-map and normal-map nodes. The derived material pairs with the
+stack through a `pawprint_source` back-reference (pointer cycle keeps both
+alive across saves). **Generation/Material view** swaps the slot material;
+material view blocks every editing/generation/painting/selection operator and
+greys the layer list. Details in
+[layers and projection](layers-and-projection.md#derived-pbr-material).
+
+Verified on Blender 5.2.2 LTS:
+
+- System Python fake server (`tools/backend_test.py`): estimate workflow graph
+  structure (both map merges fed by GetImageSize, correct preview wiring),
+  input-only upload (no mask), both result downloads, missing-Chord failure
+  before any upload, and owned-prompt cancellation.
+- Isolated headless UI (`tools/pbr_probe.py`): composite bake equals a
+  full-range commit bake and includes layer content (linear-blend color
+  management), zero-layer stacks bake the base, node wiring/colorspaces/UV
+  mapping, rebuild-in-place with name-stable map datablocks (undo cannot
+  cross node wiring), first-apply structural undo, stale-fingerprint/job
+  rejection, view-mode slot swap with editing gate and undo/redo, and
+  save/reload persistence of the pointer cycle without fake users.
+- Regression: `tools/smoke_test.py` and `tools/baking_test.py` still pass.
+
+Still needing interactive verification: Chord normal-map orientation
+(OpenGL assumed), tile seams on large composites, bleed through transparent
+regions, and Material Preview appearance.
+
+## Previous slice: configurable base resolution and source-preserving commits (version unchanged at 0.2.0)
 
 Base resolution is now a scene-wide setting (**Base width/height**, default
 2048 × 2048, minimum 64, no upper limit), shown in Layer Details. It is used
@@ -836,8 +870,6 @@ or future checks. Blender 5.0 has not been separately tested.
 
 ## Deferred / not required initially
 
-- PBR decomposition and non-destructive PBR preview, while preserving extensibility
-  and original image detail for that future work.
 - Baking an existing material as the initial base.
 - Orthographic viewpoints, cross-view projection merges, layer-level opacity, and
   separate editable layer masks.
@@ -856,7 +888,6 @@ implementation slices, settle:
   reference-image sources.
 - Candidate handling beyond the first single-result adapter; broader request
   concurrency beyond the current one-job ownership/cancel policy.
-- PBR preview/decomposition architecture when that feature is taken up.
 
 ## Early technical checks
 

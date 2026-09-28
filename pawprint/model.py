@@ -59,6 +59,9 @@ class PAWPRINT_PG_stack(bpy.types.PropertyGroup):
     commit_preserve: BoolProperty(
         name="Keep source layers", default=False,
         description="Keep the committed layers hidden instead of removing them, so their editable sources survive the commit")
+    pbr_material: PointerProperty(
+        type=bpy.types.Material,
+        description="Derived PBR material estimated from this stack; kept alive by the slot's back-reference")
 
 
 class PAWPRINT_PG_lora(bpy.types.PropertyGroup):
@@ -200,11 +203,55 @@ def active_stack(context):
     from . import painting
     if painting.active():
         return painting.session_stack()
+    if in_material_view(context):
+        # Editing is gated while the slot shows the derived PBR material.
+        return None
+    return displayed_stack(context)
+
+
+def displayed_stack(context):
+    """Resolve the stack behind the active slot, including material view.
+
+    The slot may hold either the pawprint material itself or its derived PBR
+    material (identified by the back-reference), so panels can keep showing
+    the stack in both view modes.
+    """
     obj = context.active_object
     material = obj.active_material if obj and obj.type == "MESH" else None
-    if material and material.pawprint.enabled and material.pawprint.owner == obj:
-        return material.pawprint
+    if material is None:
+        return None
+    stack = material.pawprint
+    if stack.enabled and stack.owner == obj:
+        return stack
+    source = material.pawprint_source
+    if source is not None:
+        stack = source.pawprint
+        if stack.enabled and stack.owner == obj:
+            return stack
     return None
+
+
+def in_material_view(context):
+    """Return the stack whose PBR material the active slot currently shows."""
+    obj = context.active_object
+    material = obj.active_material if obj and obj.type == "MESH" else None
+    if material is None or material.pawprint.enabled:
+        return None
+    source = material.pawprint_source
+    if source is None:
+        return None
+    stack = source.pawprint
+    if stack.enabled and stack.owner == obj:
+        return stack
+    return None
+
+
+def fingerprint_stack(stack):
+    """Identity of everything the material composite bakes from."""
+    return (stack.id_data.as_pointer(),
+            stack.base.as_pointer() if stack.base else 0,
+            tuple((layer.image.as_pointer() if layer.image else 0, layer.visible)
+                  for layer in stack.layers))
 
 
 def register():
@@ -213,6 +260,9 @@ def register():
     PAWPRINT_PG_stack.__annotations__['layers'] = CollectionProperty(type=PAWPRINT_PG_layer)
     bpy.utils.register_class(PAWPRINT_PG_stack)
     bpy.types.Material.pawprint = PointerProperty(type=PAWPRINT_PG_stack)
+    # Back-reference from a derived PBR material to its pawprint owner; the
+    # pointer cycle keeps both materials alive across saves without fake users.
+    bpy.types.Material.pawprint_source = PointerProperty(type=bpy.types.Material)
     bpy.app.handlers.load_post.append(load_layers)
     bpy.app.handlers.depsgraph_update_post.append(repair_missing_images)
     bpy.app.timers.register(migrate_existing)
@@ -223,6 +273,7 @@ def unregister():
         bpy.app.timers.unregister(migrate_existing)
     bpy.app.handlers.load_post.remove(load_layers)
     bpy.app.handlers.depsgraph_update_post.remove(repair_missing_images)
+    del bpy.types.Material.pawprint_source
     del bpy.types.Material.pawprint
     bpy.utils.unregister_class(PAWPRINT_PG_stack)
     bpy.utils.unregister_class(PAWPRINT_PG_layer)

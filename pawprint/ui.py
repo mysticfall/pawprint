@@ -2,8 +2,16 @@
 
 import bpy
 
-from .model import active_stack, active_layer
+from .model import active_stack, active_layer, displayed_stack, in_material_view
 from . import painting, backend, generation
+
+
+def material_view_hint(layout, context):
+    """Explain the read-only state while the slot shows the PBR material."""
+    if in_material_view(context) is not None:
+        layout.label(text="Material view: editing returns in Generation view.", icon='INFO')
+        return True
+    return False
 
 
 class PAWPRINT_UL_layers(bpy.types.UIList):
@@ -76,10 +84,12 @@ class PAWPRINT_PT_layers(bpy.types.Panel):
             layout.operator('pawprint.finish_paint', icon='CHECKMARK')
             layout.label(text="Escape also finishes painting.")
             return
+        stack = displayed_stack(context)
         if stack is None:
             layout.operator("pawprint.create_stack", icon='ADD')
             layout.label(text="Requires a UV map and material slot.")
             return
+        layout.enabled = active_stack(context) is not None
         row = layout.row()
         row.template_list('PAWPRINT_UL_layers', '', stack, 'layers', stack, 'active_index',
                              rows=4, sort_reverse=True)
@@ -111,6 +121,8 @@ class PAWPRINT_PT_layers(bpy.types.Panel):
                 op.shape = shape
                 op.operation = layer.selection_operation
             row.operator('pawprint.selection_clear', text='Clear')
+        if layout.enabled is False:
+            material_view_hint(layout, context)
 
 
 class PAWPRINT_PT_generation(bpy.types.Panel):
@@ -124,6 +136,8 @@ class PAWPRINT_PT_generation(bpy.types.Panel):
     def draw(self, context):
         layer = active_layer(active_stack(context))
         layout = self.layout
+        if material_view_hint(layout, context):
+            layer = None
         info = generation.review_info()
         if info:
             column = layout.column(align=True)
@@ -187,6 +201,9 @@ class PAWPRINT_PT_layer_details(bpy.types.Panel):
     bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
+        layout = self.layout
+        if material_view_hint(layout, context):
+            return
         stack = active_stack(context)
         if not stack:
             return
@@ -216,10 +233,12 @@ class PAWPRINT_PT_new_layer(bpy.types.Panel):
     bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
+        layout = self.layout
+        if material_view_hint(layout, context):
+            return
         stack = active_stack(context)
         if not stack:
             return
-        layout = self.layout
         layout.enabled = not painting.active()
         layout.prop(stack, 'preview')
         row = layout.row(align=True)
@@ -238,6 +257,8 @@ class PAWPRINT_PT_guidance(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
+        if material_view_hint(layout, context):
+            return
         layer = active_layer(active_stack(context))
         if not layer:
             layout.label(text="Select a layer to configure guidance.")
@@ -299,6 +320,45 @@ class PAWPRINT_PT_guidance(bpy.types.Panel):
                 layout.operator(section['preview'], icon='IMAGE_DATA')
 
 
+class PAWPRINT_PT_pbr(bpy.types.Panel):
+    bl_label = 'PBR Material'
+    bl_idname = 'PAWPRINT_PT_pbr'
+    bl_parent_id = 'PAWPRINT_PT_context'
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'Pawprint'
+
+    def draw(self, context):
+        layout = self.layout
+        stack = displayed_stack(context)
+        if stack is None:
+            return
+        material_view = in_material_view(context) is not None
+        row = layout.row(align=True)
+        row.enabled = not generation.active() and not generation.review_active() and not painting.active()
+        generation_button = row.operator('pawprint.view_mode', text='Generation', depress=not material_view)
+        generation_button.material_view = False
+        material_button = row.operator('pawprint.view_mode', text='Material', depress=material_view)
+        material_button.material_view = True
+        if material_view:
+            layout.label(text='The PBR material is previewing; painted layers are hidden.', icon='SHADING_TEXTURE')
+            if stack.pbr_material:
+                layout.prop(stack, 'pbr_material', text='Material')
+            layout.label(text='Roughness and metalness stay at Principled defaults.', icon='INFO')
+            return
+        if generation.active():
+            layout.label(text='Estimating albedo and normal maps…', icon='RENDER_STILL')
+            return
+        if not generation.connected(context):
+            layout.label(text='Connect in Generation to estimate maps.', icon='INFO')
+        elif not generation.chord_ready():
+            layout.label(text='No Chord model found on this server.', icon='ERROR')
+        else:
+            layout.operator('pawprint.estimate_pbr', icon='SHADING_TEXTURE')
+        if stack.pbr_material:
+            layout.label(text='Estimating again rebuilds the material with fresh maps.', icon='INFO')
+
+
 def draw_prompt_history(layout, history, negative):
     if not len(history):
         layout.label(text='No prompts yet', icon='INFO')
@@ -336,6 +396,7 @@ CLASSES = (
     PAWPRINT_PT_generation,
     PAWPRINT_PT_layer_details,
     PAWPRINT_PT_new_layer,
+    PAWPRINT_PT_pbr,
     PAWPRINT_PT_guidance,
 )
 

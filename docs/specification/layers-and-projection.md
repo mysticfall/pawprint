@@ -22,12 +22,12 @@ Composite visible projections from bottom to top using image alpha over the base
 Lower-layer changes show dynamically through transparent regions. Opaque pixels
 generated using an earlier context remain fixed until edited or regenerated.
 
-The base need not already be a PBR material. A future non-destructive PBR preview
-should allow testing the committed base without damaging its original appearance.
-PBR decomposition is deferred; retain original images and leave room for derived
-channel images. Decomposition may discard detail, so replacing the source image
-with its output is not an acceptable assumed workflow. Whether decomposition is
-an adjustment layer or another operation remains open.
+The base need not already be a PBR material. The derived PBR material
+([below](#derived-pbr-material)) provides non-destructive preview without
+damaging the original appearance. Original images are retained and derived
+channel images are separate datablocks, so decomposition never replaces its
+source. Whether decomposition beyond albedo/normal estimation (roughness,
+metalness) is exposed remains open.
 
 Optional baking of an existing material is useful but not essential. The more
 common bootstrap is a first ordinary projection generated with guidance.
@@ -159,3 +159,39 @@ to restore that state.
 
 **Open:** bake sampling/margin controls and the exact controls for choosing
 the group.
+
+## Derived PBR material
+
+The stack's baked-lighting composite stays the inpainting work surface; a
+**separate derived PBR material** previews the result and supports retouching
+with other material-painting extensions. The two serve different purposes and
+are never merged into one datablock.
+
+**Estimate Albedo & Normal** bakes the current stack through its top layer
+into a temporary UV composite (same slot-isolated emission bake as commits),
+uploads it to ComfyUI, and runs the tiled Chord material-estimation workflow
+(1024² tiles, 128px overlap, circular padding — the reference "Tiled Chord"
+graph) producing **albedo and normal only**; roughness/metalness outputs stay
+unconnected and Principled defaults are kept. Results are applied into packed
+map datablocks (`Pawprint Albedo` sRGB, `Pawprint Normal` Non-Color) wired
+through a UV-map node and a normal-map node on `stack.pbr_material`
+("Pawprint PBR"). A `pawprint_source` back-reference pairs the two materials,
+and the pointer cycle keeps both alive across saves without fake users.
+
+**Generation/Material view** swaps the object's slot material between the
+pawprint material and the derived PBR material. Material view shows a
+read-only stack UI; all editing, generation, painting, selection, and commit
+operators are gated off while it is active. Viewport shading is left to the
+user.
+
+Re-estimation reuses the same material, nodes, and map datablocks, refreshing
+pixels and links in place: removing and re-renaming image datablocks scrambles
+node→image pointers across memfile undo. Undo removes a first-ever derived
+material in one step; later re-applies keep structure stable, and map pixel
+reloads may survive memfile undo like other direct image writes. The estimate
+job guards owner/slot/stack identity and pixel digests per tick and at
+completion, cancelling itself when the target changes.
+
+**Open:** roughness/metalness exposure, Chord normal-map orientation
+verification (assumed OpenGL), tile-seam behavior on large composites, and
+bleed through fully transparent regions.
