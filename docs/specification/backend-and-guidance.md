@@ -258,51 +258,83 @@ native single-step undo/redo and stale-target guards) was verified with the inst
 SDXL Plus ViT-H model and EpicRealismXL.
 
 ## Implemented inpaint guidance
-After several rounds of user review, the design settled on two principles: **the
-existence of a selection alone selects the workflow** (no toggle, no
-denoise-threshold switching), and — per the user's latest reference graph — the
-masked path uses **`InpaintModelConditioning`** rather than repaint ControlNets,
-preprocessors or `VAEEncodeForInpaint`:
+After several rounds of user review, the design settled on the principle that
+**the existence of a selection alone selects the workflow** (no toggle). The
+masked path now follows the user's two confirmed reference graphs — the
+"replace" pipeline at denoise 1.0 and the "refine" pipeline below it — built
+from the ImpactPack inpaint nodes instead of repaint ControlNets or
+`VAEEncodeForInpaint`:
 
-- **Selection present** (any size, any denoise): text encodes flow through the
-  optional depth apply into `InpaintModelConditioning` (checkpoint VAE, input
-  pixels, selection mask, `noise_mask=True`). The core node emits both the
-  inpaint-aware conditioning (slots 0/1) and a noise-masked latent (slot 2); the
-  sampler takes all three. The decoded result then passes through
-  `ImageCompositeMasked` (destination = the original uploaded input, source = the
-  decoded image, same mask, zero offset, no resize), so the server itself returns
-  pixels that are exactly the original outside the mask. Core nodes only — the
-  `comfyui_controlnet_aux` dependency is gone.
-- **No selection** (`Clear`): plain `VAEEncode` + `SetLatentNoiseMask` over the whole
-  frame — ordinary img2img. The latent is always created from the rendered composite
-  of the framed area, even at denoise 1.0; an empty-latent init was considered and
-  explicitly dropped during review.
+- **Model chain** (both denoise modes): checkpoint → ordered
+  `LoraLoaderModelOnly` stack → optional IPAdapter patch →
+  `SelfAttentionGuidance` (scale 0.5, blur sigma 2.0) → `DifferentialDiffusion`
+  → `INPAINT_ApplyFooocusInpaint` with the hardcoded Fooocus pair
+  (`fooocus_inpaint_head.pth` + `inpaint_v26.fooocus.patch` from
+  `INPAINT_LoadFooocusInpaint`). The patched model feeds both the guider and
+  the scheduler.
+- **Replace (denoise 1.0)**: the uploaded hard mask is expanded by the layer's
+  feather (`INPAINT_ExpandMask`, grow = feather, linear blur ≈ 1.7×, as with
+  ZIT) and stabilized (`INPAINT_StabilizeMask`, epsilon 0.01). A tight
+  secondary mask (grow 4, no blur) drives a dedicated MAT inpaint model
+  (`INPAINT_LoadInpaintModel` auto-picked from the server list +
+  `INPAINT_InpaintWithModel`) that pre-fills the selection;
+  `INPAINT_VAEEncodeInpaintConditioning` then encodes the **pre-filled**
+  pixels under the stabilized mask, and `BasicScheduler` runs its whole sigma
+  schedule.
+- **Refine (denoise < 1.0)**: no stabilization and no pre-fill — the inpaint
+  conditioning encodes the **original** pixels under the expanded feather
+  mask, and `SplitSigmas` cuts the schedule at step `round(steps × (1 −
+  denoise))` so sampling enters exactly where the denoise strength skips (the
+  reference: 35 steps, step 14, denoise 0.6).
+- **Sampling**: `RandomNoise` → `KSamplerSelect` → `CFGGuider` (request CFG,
+  positive/negative from the conditioning node slots 0/1) →
+  `SamplerCustomAdvanced` over the noise-masked latent (slot 3); the Fooocus
+  patch consumes slot 2. `VAEDecode` (slot 1 samples) →
+  `INPAINT_ColorMatch` (reference = the pixels fed to the VAE — pre-fill at
+  full denoise, original below — `exclude_mask` = the mask fed to the
+  conditioning, strength 1.0) → `PreviewImage`.
+- **No selection** (`Clear`): plain `VAEEncode` + `SetLatentNoiseMask` over the
+  whole frame — ordinary img2img through `KSampler`. The latent is always
+  created from the rendered composite of the framed area, even at denoise 1.0;
+  an empty-latent init was considered and explicitly dropped during review.
 
-Denoise governs only how much existing content survives sampling; it never changes
-the graph structure. `Generate` derives the `masked` flag from
-`layer.selection_paths` and passes it with the request; the worker's `validate` and
-`workflow` read it, and it is not a persisted RNA property. The server-side
-composite is a belt-and-braces preservation; the client still applies the result
-through its own feathered selection stencil, so unselected layer pixels remain
-untouched regardless of what the server returns. There is no inpaint strength knob:
-selection alone routes inpainting.
+There is still no inpaint strength knob: selection alone routes inpainting,
+and denoise picks replace vs. refine. `Generate` derives the `masked` flag
+from `layer.selection_paths` and passes it with the request; the worker's
+`validate` and `workflow` read it, and it is not a persisted RNA property.
+Patch placement back onto the layer stays client-side through the feathered
+selection stencil (the former server-side `ImageCompositeMasked` composite was
+removed with the old graph), so unselected layer pixels remain untouched
+regardless of what the server returns.
 
-Depth guidance is the only remaining ControlNet consumer: masked requests validate
-on a bare server, and `controlnet_model` is checked only when `depth_enabled` is
-set. Depth applies first on the conditioning path (nodes 12/23/14), the resulting
-positive/negative feed `InpaintModelConditioning`, and IPAdapter keeps patching the
-model separately, so all three compose. Every `ControlNetApplyAdvanced` still
-receives the checkpoint VAE.
+Depth guidance is the only ControlNet consumer: masked requests validate
+without ControlNet weights, and `controlnet_model` is checked only when
+`depth_enabled` is set. Depth applies first on the conditioning path (nodes
+12/23/14), the resulting positive/negative feed
+`INPAINT_VAEEncodeInpaintConditioning`, and IPAdapter keeps patching the model
+before the guidance wrappers, so all three compose. Every
+`ControlNetApplyAdvanced` still receives the checkpoint VAE.
 
-The masked path reuses the single composite upload, so no extra server input is
-created. The complete path (discovery, generation in all five live-variant shapes —
-unmasked plain img2img, masked model-conditioning runs with depth, IPAdapter, and
-denoise 1.0 with mean-delta verification inside the full-weight footprint, plus the
-former Qwen magenta variant, since removed — pixel isolation, single-step undo/redo, settings
-restoration, cancellation and stale-target guards) was live-tested against ComfyUI
-0.36.0 with EpicRealismXL and `sdxl_promax.safetensors`; unit tests cover capability
-filtering, graph shapes for both modes, the model-conditioning/composite wiring and
-exactly three uploads (input/mask/depth) without a server.
+Discovery adds the full node stack (`SelfAttentionGuidance`,
+`DifferentialDiffusion`, `INPAINT_VAEEncodeInpaintConditioning`,
+`INPAINT_LoadFooocusInpaint`, `INPAINT_ApplyFooocusInpaint`,
+`INPAINT_LoadInpaintModel`, `INPAINT_InpaintWithModel`, `INPAINT_ExpandMask`,
+`INPAINT_StabilizeMask`, `INPAINT_ColorMatch`, `RandomNoise`,
+`KSamplerSelect`, `BasicScheduler`, `CFGGuider`, `SplitSigmas`,
+`SamplerCustomAdvanced`) to the SDXL required set and reports
+`sdxl_inpaint` (the MAT-style pre-fill model, combo shapes in both classic
+options-list and newer `[type, config]` object_info forms understood).
+Validation rejects full-denoise selections on servers that report no inpaint
+model; refinement needs none.
+
+The masked path reuses the single composite upload, so no extra server input
+is created. The headlessly verified parts: capability filtering, graph shapes
+for both modes (replace/refine, with/without depth and IPAdapter), the
+MAT-gating rule and exactly three uploads (input/mask/depth) through the
+fake-server unit tests. The complete live path (discovery, generation,
+pixel isolation, single-step undo/redo, cancellation and stale-target guards)
+still needs interactive verification against a ComfyUI server with the
+Fooocus/MAT weights installed.
 
 ## Implemented LoRA stacks
 

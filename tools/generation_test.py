@@ -423,9 +423,9 @@ def worker():
                         graph = entry['prompt'][2]
                         classes = {key: value['class_type'] for key, value in graph.items()}
                         # The submitted graph follows the selection and the
-                        # adapter: SDXL selections run InpaintModelConditioning,
-                        # ZIT selections run the reference inpaint pipeline and
-                        # unmasked requests plain whole-frame img2img.
+                        # adapter: SDXL selections run the reference inpaint
+                        # pipeline, ZIT selections its own reference pipeline
+                        # and unmasked requests plain whole-frame img2img.
                         if state.get('zit'):
                             # Z Image Turbo reference inpainting: MAT pre-fill,
                             # Fun ControlNet in inpaint mode, DifferentialDiffusion
@@ -495,22 +495,67 @@ def worker():
                             assert 'ConditioningZeroOut' not in classes.values()
                             assert 'TextEncodeQwenImageEditPlus' not in classes.values()
                         elif state.get('masked'):
-                            # Model conditioning builds the inpaint latent and
-                            # the masked composite preserves the unselected
-                            # pixels server-side; no inpaint VAE or
-                            # preprocessor nodes exist anywhere.
-                            assert classes['25'] == 'InpaintModelConditioning', classes.get('25')
-                            assert classes['28'] == 'ImageCompositeMasked', classes.get('28')
-                            assert graph['28']['inputs']['destination'] == ['2', 0]
-                            assert graph['28']['inputs']['source'] == ['11', 0]
-                            assert graph['10']['inputs']['images'] == ['28', 0]
-                            assert graph['9']['inputs']['latent_image'] == ['25', 2]
-                            assert graph['9']['inputs']['positive'] == ['25', 0]
+                            # The reference inpaint pipeline: the Fooocus patch
+                            # joins the model chain, inpaint conditioning
+                            # builds the latent and the advanced sampling stack
+                            # ends in a colour match. Full denoise pre-fills
+                            # through a MAT inpaint model; refinement encodes
+                            # the original pixels with a split sigma schedule.
+                            full = layer.generation_denoise >= 1.0
+                            feather = layer.generation_feather
+                            assert classes['26'] == 'INPAINT_ExpandMask', classes.get('26')
+                            assert graph['26']['inputs'] == {'mask': ['4', 0], 'grow': feather,
+                                                             'blur': int(feather * 1.7), 'blur_type': 'linear'}
+                            assert classes['25'] == 'SelfAttentionGuidance'
+                            assert classes['29'] == 'DifferentialDiffusion'
+                            assert classes['21'] == 'INPAINT_VAEEncodeInpaintConditioning'
+                            assert classes['22'] == 'INPAINT_LoadFooocusInpaint'
+                            assert classes['31'] == 'INPAINT_ApplyFooocusInpaint'
+                            assert graph['31']['inputs']['latent'] == ['21', 2]
+                            assert classes['44'] == 'RandomNoise'
+                            assert classes['45'] == 'KSamplerSelect'
+                            assert classes['46'] == 'CFGGuider'
+                            assert graph['46']['inputs']['positive'] == ['21', 0]
+                            assert classes['47'] == 'BasicScheduler'
+                            assert graph['47']['inputs']['denoise'] == 1.0
+                            assert classes['49'] == 'SamplerCustomAdvanced'
+                            assert graph['49']['inputs']['latent_image'] == ['21', 3]
+                            assert classes['41'] == 'VAEDecode'
+                            assert graph['41']['inputs']['samples'] == ['49', 1]
+                            assert classes['56'] == 'INPAINT_ColorMatch'
+                            assert classes['10'] == 'PreviewImage'
+                            assert graph['10']['inputs']['images'] == ['56', 0]
+                            if full:
+                                assert classes['27'] == 'INPAINT_StabilizeMask'
+                                assert classes['42'] == 'INPAINT_LoadInpaintModel'
+                                assert classes['43'] == 'INPAINT_InpaintWithModel'
+                                assert graph['21']['inputs']['pixels'] == ['43', 0]
+                                assert graph['21']['inputs']['mask'] == ['27', 0]
+                                assert graph['49']['inputs']['sigmas'] == ['47', 0]
+                                assert graph['56']['inputs']['reference'] == ['43', 0]
+                                assert graph['56']['inputs']['exclude_mask'] == ['27', 0]
+                            else:
+                                assert '27' not in classes and '43' not in classes
+                                assert graph['21']['inputs']['pixels'] == ['2', 0]
+                                assert graph['21']['inputs']['mask'] == ['26', 0]
+                                assert classes['48'] == 'SplitSigmas'
+                                assert graph['48']['inputs']['step'] == round(
+                                    layer.generation_steps * (1 - layer.generation_denoise))
+                                assert graph['49']['inputs']['sigmas'] == ['48', 1]
+                                assert graph['56']['inputs']['reference'] == ['2', 0]
+                                assert graph['56']['inputs']['exclude_mask'] == ['26', 0]
+                            assert 'KSampler' not in classes.values()
+                            assert 'ImageCompositeMasked' not in classes.values()
+                            assert 'InpaintModelConditioning' not in classes.values()
+                            assert 'VAEEncode' not in classes.values()
                             assert 'VAEEncodeForInpaint' not in classes.values()
                             assert 'InpaintPreprocessor' not in classes.values()
                             if '--depth' in sys.argv:
                                 assert classes['14'] == 'ControlNetApplyAdvanced'
-                                assert graph['25']['inputs']['positive'] == ['14', 0]
+                                assert graph['21']['inputs']['positive'] == ['14', 0]
+                            if '--ipadapter' in sys.argv:
+                                assert classes['18'] == 'IPAdapterAdvanced'
+                                assert graph['25']['inputs']['model'] == ['18', 0]
                         else:
                             assert classes['5'] == 'VAEEncode' and classes['6'] == 'SetLatentNoiseMask'
                             assert 'VAEEncodeForInpaint' not in classes.values()

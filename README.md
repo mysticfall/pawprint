@@ -195,12 +195,14 @@ materials are not baked into the initial gray base.
     Generate runs, kept per scene, newest first, up to 32 entries); choose one to
     replace the field, or use its **Clear history** entry to reset the list.
      4. Choose the full frame or selected context, feather and padding. A
-         selection means inpainting. With SDXL the request routes through
-         `InpaintModelConditioning` and an `ImageCompositeMasked` output stage, so the
-         selected pixels are regenerated rather than refined (denoise 1.0 re-imagines
-         them completely) while the surrounding context conditions each step for a
-         seamless blend and the server returns the original pixels outside the
-         selection exactly. With Z Image Turbo, selections run a reference inpainting
+         selection means inpainting. With SDXL the request routes through the
+         reference inpaint pipeline: the feather-expanded mask feeds
+         `INPAINT_VAEEncodeInpaintConditioning`, the Fooocus inpaint patch
+         wraps the model chain and the advanced sampling stack ends in an
+         `INPAINT_ColorMatch` step. At denoise 1.0 a dedicated MAT inpaint
+         model pre-fills the selection (complete re-imagination), while lower
+         denoise refines the original pixels from a split sigma schedule; the
+         surrounding context conditions each step for a seamless blend. With Z Image Turbo, selections run a reference inpainting
          pipeline: the Fun ControlNet steers every selection in inpaint mode
          (optionally with a depth image), at denoise 1.0 the region is
          additionally pre-filled by a dedicated MAT inpaint model, and at lower
@@ -233,8 +235,12 @@ materials are not baked into the initial gray base.
       settings are stored per layer; new
       layers inherit them like the other generation fields. Z Image Turbo has no
       reference guidance yet — it is planned future work.
-    7. Plain selection inpainting needs no ControlNet and no extra server nodes —
-        `InpaintModelConditioning` and `ImageCompositeMasked` are core ComfyUI nodes.
+    7. Plain SDXL selection inpainting needs no ControlNet, but it does need
+        the ImpactPack inpaint nodes (inpaint conditioning, Fooocus patch,
+        color match, advanced sampler stack) plus the Fooocus files
+        (`fooocus_inpaint_head.pth`, `inpaint_v26.fooocus.patch`); full-denoise
+        selections additionally need a MAT inpaint model such as
+        `MAT_Places512_G_fp16.safetensors`.
         A union ControlNet is only involved when **Depth guidance** is enabled
          (step 5). Z Image Turbo selections use the inpainting described in step 4.
    8. Z Image Turbo prompts are plain text — no edit-instruction wrapping — and the
@@ -293,9 +299,15 @@ shader displacement/volumes are excluded. Geometry capture is synchronous too.
 Depth guidance uses one union ControlNet: it requires the standard ControlNet
 loader/apply nodes plus the `SetUnionControlNetType` selector, with Xinsir's Pro Max
 SDXL weights (`sdxl_promax.safetensors`) tuning the union type for the depth apply,
-which receives the checkpoint VAE. Selection inpainting itself uses only core nodes
-(`InpaintModelConditioning`, `ImageCompositeMasked`) and needs neither a ControlNet
-nor `comfyui_controlnet_aux`. The combined workflow was
+which receives the checkpoint VAE. SDXL selection inpainting follows the
+reference pipelines: it needs the ImpactPack inpaint nodes
+(`INPAINT_VAEEncodeInpaintConditioning`, `INPAINT_LoadFooocusInpaint`/
+`INPAINT_ApplyFooocusInpaint` with `fooocus_inpaint_head.pth` +
+`inpaint_v26.fooocus.patch`, `INPAINT_ColorMatch`, the advanced sampler stack)
+plus `SelfAttentionGuidance` and `DifferentialDiffusion`; full-denoise
+selections additionally need a MAT inpaint model such as
+`MAT_Places512_G_fp16.safetensors`. Neither a ControlNet
+nor `comfyui_controlnet_aux` is involved. The combined workflow was
 live-tested at denoise 1.0 with full selection replacement. IPAdapter requires the ComfyUI_IPAdapter_plus loader and
 apply nodes, an installed SDXL IPAdapter model, and its paired CLIP Vision encoder
 (ViT-H adapters need the ViT-H encoder; ViT-G/bigG adapters need the bigG encoder).
@@ -383,7 +395,8 @@ python3 tools/generation_test.py
 python3 tools/generation_test.py --depth
 # Same live workflow with IPAdapter reference conditioning:
 python3 tools/generation_test.py --ipadapter
-# Same live workflow with selection inpainting (InpaintModelConditioning + ImageCompositeMasked) at denoise 1.0:
+# Same live workflow with reference selection inpainting (Fooocus patch +
+# MAT pre-fill) at denoise 1.0:
 python3 tools/generation_test.py --inpaint
 # Same live workflow with the Z Image Turbo adapter (z_image_turbo + LoRA stack,
 # DiffSynth ControlNet depth patch, reference selection inpainting):

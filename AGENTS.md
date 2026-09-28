@@ -42,11 +42,18 @@ paired CLIP Vision encoder, weight, uncropped upload) composes with depth guidan
 Depth guidance uses one union ControlNet (default Xinsir Pro Max
 sdxl_promax.safetensors via SetUnionControlNetType; the apply receives the
 checkpoint VAE). The latent mode is selected only by the existence of a
-selection: selections use InpaintModelConditioning (core node emitting inpaint
-conditioning plus a noise-masked latent) followed by ImageCompositeMasked to
-preserve the unselected pixels server-side, with no ControlNet, no preprocessor
-and no strength knob; no selection uses plain VAEEncode + SetLatentNoiseMask
-whole-frame img2img; denoise never changes the graph.
+selection: selections follow the user's confirmed reference inpaint pipelines —
+the feather-expanded mask (stabilized at full denoise) feeds
+INPAINT_VAEEncodeInpaintConditioning, SelfAttentionGuidance + DifferentialDiffusion
++ the Fooocus inpaint patch (fooocus_inpaint_head.pth / inpaint_v26.fooocus.patch)
+wrap the model chain, CFGGuider/RandomNoise/KSamplerSelect/BasicScheduler/
+SamplerCustomAdvanced sample the noise-masked latent and INPAINT_ColorMatch
+re-matches against the encoded pixels; denoise 1.0 additionally pre-fills the
+selection through a discovered MAT inpaint model (INPAINT_LoadInpaintModel +
+INPAINT_InpaintWithModel behind a tight mask) while lower denoise encodes the
+original pixels and enters the schedule at SplitSigmas step
+round(steps × (1 − denoise)); patch placement stays client-side.
+No selection uses plain VAEEncode + SetLatentNoiseMask whole-frame img2img.
 A per-layer ordered LoRA stack with per-entry strength chains through
 LoraLoaderModelOnly for both adapters; ZIT's former single style-LoRA field is
 removed. A second adapter family is selectable per layer via Model type: Z Image Turbo

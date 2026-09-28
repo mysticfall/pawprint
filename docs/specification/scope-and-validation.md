@@ -1,6 +1,41 @@
 # Scope and validation
 
-## Current slice: ZIT refine ControlNet (version unchanged at 0.2.0)
+## Current slice: SDXL reference inpaint pipelines (version unchanged at 0.2.0)
+
+The user supplied two reference ComfyUI workflows, `workflow-inpaint-replace.json`
+(denoise 1.0) and `workflow-refine.json` (denoise below 1.0), and asked for the
+SDXL selected-region graph to follow them, with the instruction "Assume all the
+required nodes and models are available on the ComfyUI backend."
+
+`_sdxl_workflow`'s masked branch was rebuilt around the reference core: the
+feather-expanded mask (`INPAINT_ExpandMask`, kept at the established grow/blur
+1.7 ratio) feeds `INPAINT_VAEEncodeInpaintConditioning`, whose noise-masked
+latent output is sampled by `CFGGuider`/`RandomNoise`/`KSamplerSelect`/
+`BasicScheduler`/`SamplerCustomAdvanced`, and `INPAINT_ColorMatch` re-matches
+the decoded result against the encoded pixels outside the mask. The model chain
+gains `SelfAttentionGuidance` + `DifferentialDiffusion` and the Fooocus inpaint
+patch (`INPAINT_LoadFooocusInpaint` with the hardcoded
+fooocus_inpaint_head.pth / inpaint_v26.fooocus.patch pair, applied to the
+conditioning latent). At denoise 1.0 the selection is pre-filled through a
+discovered MAT inpaint model (`INPAINT_LoadInpaintModel` +
+`INPAINT_InpaintWithModel` behind a tight 4-pixel mask) and the expanded mask
+is stabilized; below 1.0 the original pixels are encoded and the schedule
+enters late via `SplitSigmas(step = round(steps × (1 − denoise)))`.
+`ImageCompositeMasked` is gone — unselected pixels are preserved client-side by
+the existing patch placement. IPAdapter now patches the model before the
+guidance wrappers in both modes; the unmasked img2img path is unchanged.
+
+`capabilities` reports a new `sdxl_inpaint` entry (MAT-preferring discovery
+over the `INPAINT_LoadInpaintModel` combo, mirroring `zit_inpaint`), and
+`validate` rejects full-denoise selections when no inpaint model is listed.
+
+Verified headlessly: `python3 tools/backend_test.py` (12 tests, including the
+rewritten reference-pipeline test covering replace and refine wiring, the
+empty-combo validation gate and the worker round-trip). Live verification
+against ComfyUI is pending: the server needs the Fooocus patch files and a MAT
+model for the full-denoise path.
+
+## Previous slice: ZIT refine ControlNet (version unchanged at 0.2.0)
 
 The user suspected: "I have a feeling that control net only works with
 denoising strength of 1.0 with a ZIT workflow. Can you check if this is the

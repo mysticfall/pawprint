@@ -26,6 +26,8 @@ class BackendTest(unittest.TestCase):
         self.prompts = 0
         self.info = {name: {} for name in backend.REQUIRED}
         self.info['CheckpointLoaderSimple'] = {'input': {'required': {'ckpt_name': [['test.safetensors']]}}}
+        self.info['INPAINT_LoadInpaintModel'] = {'input': {'required': {'model_name': [[
+            'MAT_Places512_G_fp16.safetensors', 'lama_large_512px.safetensors']]}}}
         self.info['KSampler'] = {'input': {'required': {
             'sampler_name': [['dpmpp_2m', 'euler', 'res_multistep']], 'scheduler': [['karras', 'simple']],
             'steps': ['INT', {'min':1, 'max':10000}], 'cfg': ['FLOAT', {'min':0, 'max':100}],
@@ -228,15 +230,16 @@ class BackendTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'reference image is missing'):
             backend.workflow(dict(self.settings, ipadapter_enabled=True, depth_enabled=False), 'in.png', 'mask.png')
 
-    def test_inpaint_selection_drives_model_conditioning(self):
+    def test_inpaint_selection_drives_reference_pipeline(self):
         caps = backend.capabilities(self.info)
+        self.assertEqual(caps['sdxl_inpaint'], 'MAT_Places512_G_fp16.safetensors')
         # Without a selection none of the inpaint machinery is needed; a plain
         # server without any ControlNet machinery still accepts whole-frame
         # img2img.
         backend.validate(dict(self.settings, masked=False), caps)
-        # A selection means model-level inpainting through the core
-        # InpaintModelConditioning node: no ControlNet or preprocessor is
-        # required, so a bare server accepts masked requests too.
+        # A selection runs the reference pipeline; its nodes are part of the
+        # SDXL contract, so any server offering SDXL accepts masked requests
+        # below full denoise without extra weights.
         self.settings['masked'] = True
         backend.validate(self.settings, caps)
         # Depth guidance keeps requiring the union ControlNet weight.
@@ -254,36 +257,91 @@ class BackendTest(unittest.TestCase):
         caps = backend.capabilities(self.info)
         self.assertEqual(caps['controlnet_models'], ['sdxl_promax.safetensors'])
         backend.validate(self.settings, caps)
-        # Depth patches conditioning first; InpaintModelConditioning consumes
-        # it, encodes the input itself and attaches the noise mask, producing
-        # the final conditioning and latent. ImageCompositeMasked rebuilds the
-        # output so pixels outside the mask stay exactly the original input.
-        graph = backend.workflow(self.settings, 'in.png', 'mask.png', 'depth.png')
-        self.assertEqual(graph['25']['class_type'], 'InpaintModelConditioning')
-        self.assertEqual(graph['25']['inputs']['positive'], ['14', 0])
-        self.assertEqual(graph['25']['inputs']['negative'], ['14', 1])
-        self.assertEqual(graph['25']['inputs']['vae'], ['1', 2])
-        self.assertEqual(graph['25']['inputs']['pixels'], ['2', 0])
-        self.assertEqual(graph['25']['inputs']['mask'], ['4', 0])
-        self.assertTrue(graph['25']['inputs']['noise_mask'])
-        self.assertEqual(graph['28']['class_type'], 'ImageCompositeMasked')
-        self.assertEqual(graph['28']['inputs']['destination'], ['2', 0])
-        self.assertEqual(graph['28']['inputs']['source'], ['11', 0])
-        self.assertEqual(graph['28']['inputs']['mask'], ['4', 0])
-        self.assertFalse(graph['28']['inputs']['resize_source'])
-        self.assertEqual(graph['10']['inputs']['images'], ['28', 0])
-        self.assertEqual(graph['9']['inputs']['positive'], ['25', 0])
-        self.assertEqual(graph['9']['inputs']['negative'], ['25', 1])
-        self.assertEqual(graph['9']['inputs']['latent_image'], ['25', 2])
-        # No dedicated VAE encode of any kind in the masked mode.
-        for key in ('5', '6'):
+        # Below full denoise the refine pipeline runs: depth patches the
+        # conditioning first, the expanded feather mask gates the inpaint
+        # conditioning of the original pixels, the Fooocus patch joins the
+        # model chain, and the split sigma schedule enters at the step the
+        # denoise strength skips. Colors re-match against the original input.
+        settings = dict(self.settings, feather=12)
+        graph = backend.workflow(settings, 'in.png', 'mask.png', 'depth.png', caps=caps)
+        self.assertEqual(graph['26']['class_type'], 'INPAINT_ExpandMask')
+        self.assertEqual(graph['26']['inputs'],
+                         {'mask': ['4', 0], 'grow': 12, 'blur': 20, 'blur_type': 'linear'})
+        self.assertEqual(graph['21']['class_type'], 'INPAINT_VAEEncodeInpaintConditioning')
+        self.assertEqual(graph['21']['inputs'], {'vae': ['1', 2], 'pixels': ['2', 0],
+                                                 'mask': ['26', 0], 'positive': ['14', 0],
+                                                 'negative': ['14', 1]})
+        self.assertEqual(graph['25']['class_type'], 'SelfAttentionGuidance')
+        self.assertEqual(graph['25']['inputs'], {'model': ['1', 0], 'scale': 0.5, 'blur_sigma': 2.0})
+        self.assertEqual(graph['29']['class_type'], 'DifferentialDiffusion')
+        self.assertEqual(graph['29']['inputs'], {'model': ['25', 0]})
+        self.assertEqual(graph['22']['class_type'], 'INPAINT_LoadFooocusInpaint')
+        self.assertEqual(graph['22']['inputs'],
+                         {'head': 'fooocus_inpaint_head.pth', 'patch': 'inpaint_v26.fooocus.patch'})
+        self.assertEqual(graph['31']['class_type'], 'INPAINT_ApplyFooocusInpaint')
+        self.assertEqual(graph['31']['inputs'],
+                         {'model': ['29', 0], 'patch': ['22', 0], 'latent': ['21', 2]})
+        self.assertEqual(graph['44']['inputs'], {'noise_seed': 2**64-1})
+        self.assertEqual(graph['45']['inputs'], {'sampler_name': settings['sampler']})
+        self.assertEqual(graph['46']['class_type'], 'CFGGuider')
+        self.assertEqual(graph['46']['inputs'], {'model': ['31', 0], 'positive': ['21', 0],
+                                                 'negative': ['21', 1], 'cfg': settings['cfg']})
+        self.assertEqual(graph['47']['class_type'], 'BasicScheduler')
+        self.assertEqual(graph['47']['inputs']['denoise'], 1.0)
+        self.assertEqual(graph['48']['class_type'], 'SplitSigmas')
+        self.assertEqual(graph['48']['inputs'], {'sigmas': ['47', 0], 'step': 8})
+        self.assertEqual(graph['49']['class_type'], 'SamplerCustomAdvanced')
+        self.assertEqual(graph['49']['inputs'],
+                         {'noise': ['44', 0], 'guider': ['46', 0], 'sampler': ['45', 0],
+                          'sigmas': ['48', 1], 'latent_image': ['21', 3]})
+        self.assertEqual(graph['41']['class_type'], 'VAEDecode')
+        self.assertEqual(graph['41']['inputs'], {'samples': ['49', 1], 'vae': ['1', 2]})
+        self.assertEqual(graph['56']['class_type'], 'INPAINT_ColorMatch')
+        self.assertEqual(graph['56']['inputs'], {'target': ['41', 0], 'reference': ['2', 0],
+                                                 'exclude_mask': ['26', 0], 'strength': 1.0})
+        self.assertEqual(graph['10']['inputs']['images'], ['56', 0])
+        for key in ('5', '6', '9', '11', '27', '33', '42', '43'):
             self.assertNotIn(key, graph)
-        self.assertFalse(any(node['class_type'] in ('VAEEncode', 'VAEEncodeForInpaint', 'InpaintPreprocessor')
-                             for node in graph.values()))
+        classes = {node['class_type'] for node in graph.values()}
+        self.assertNotIn('InpaintModelConditioning', classes)
+        self.assertNotIn('ImageCompositeMasked', classes)
+        self.assertNotIn('VAEEncode', classes)
+        # Full denoise: the replace pipeline stabilizes the expanded mask,
+        # pre-fills the selection through a MAT inpaint model behind a tight
+        # mask, encodes the pre-filled pixels as the latent and ColorMatch
+        # reference, and keeps a whole sigma schedule.
+        full = dict(self.settings, denoise=1.0)
+        backend.validate(full, caps)
+        graph = backend.workflow(full, 'in.png', 'mask.png', 'depth.png', caps=caps)
+        self.assertEqual(graph['27']['class_type'], 'INPAINT_StabilizeMask')
+        self.assertEqual(graph['27']['inputs'], {'mask': ['26', 0], 'epsilon': 0.01})
+        self.assertEqual(graph['33']['inputs'],
+                         {'mask': ['4', 0], 'grow': 4, 'blur': 0, 'blur_type': 'gaussian'})
+        self.assertEqual(graph['42']['class_type'], 'INPAINT_LoadInpaintModel')
+        self.assertEqual(graph['42']['inputs'], {'model_name': 'MAT_Places512_G_fp16.safetensors'})
+        self.assertEqual(graph['43']['class_type'], 'INPAINT_InpaintWithModel')
+        self.assertEqual(graph['43']['inputs'], {'inpaint_model': ['42', 0], 'image': ['2', 0],
+                                                 'mask': ['33', 0], 'seed': 2**64-1})
+        self.assertEqual(graph['21']['inputs']['pixels'], ['43', 0])
+        self.assertEqual(graph['21']['inputs']['mask'], ['27', 0])
+        self.assertNotIn('48', graph)
+        self.assertEqual(graph['49']['inputs']['sigmas'], ['47', 0])
+        self.assertEqual(graph['56']['inputs']['reference'], ['43', 0])
+        self.assertEqual(graph['56']['inputs']['exclude_mask'], ['27', 0])
         # Without depth the conditioning flows straight from the text encodes.
         graph = backend.workflow(dict(self.settings, depth_enabled=False), 'in.png', 'mask.png')
-        self.assertEqual(graph['25']['inputs']['positive'], ['7', 0])
+        self.assertEqual(graph['21']['inputs']['positive'], ['7', 0])
         self.assertNotIn('13', graph)
+        # A server without any inpaint pre-fill model rejects full-denoise
+        # selections; refinement keeps working.
+        self.info['INPAINT_LoadInpaintModel'] = {'input': {'required': {'model_name': [[]]}}}
+        caps = backend.capabilities(self.info)
+        self.assertIsNone(caps['sdxl_inpaint'])
+        with self.assertRaisesRegex(ValueError, 'Inpaint model'):
+            backend.validate(full, caps)
+        backend.validate(self.settings, caps)
+        self.info['INPAINT_LoadInpaintModel'] = {'input': {'required': {'model_name': [[
+            'MAT_Places512_G_fp16.safetensors', 'lama_large_512px.safetensors']]}}}
         # Without a selection none of the inpaint machinery appears: plain VAE
         # encode, whole-frame noise mask, conditioning straight to the depth
         # apply, decoded image as output.
@@ -293,19 +351,19 @@ class BackendTest(unittest.TestCase):
         self.assertEqual(graph['9']['inputs']['latent_image'], ['6', 0])
         self.assertEqual(graph['9']['inputs']['positive'], ['14', 0])
         self.assertEqual(graph['10']['inputs']['images'], ['11', 0])
-        for key in ('25', '28'):
+        for key in ('21', '25', '26'):
             self.assertNotIn(key, graph)
         # The worker uploads exactly the composite, mask and depth maps; the
-        # composite node reuses the single input upload.
+        # masked graph consumes the single input upload.
         backend.publish(self.directory, 'request.json', dict(operation='generate', settings=self.settings,
                         server=f'http://127.0.0.1:{self.server.server_port}'))
         (self.directory / 'depth.png').write_bytes(b'fixture depth')
         backend.run(self.directory)
         self.assertEqual(sum(path == '/upload/image' for _, path, _ in self.calls), 3)
         graph = next(body['prompt'] for _, path, body in self.calls if path == '/prompt')
-        self.assertEqual(graph['25']['class_type'], 'InpaintModelConditioning')
+        self.assertEqual(graph['21']['class_type'], 'INPAINT_VAEEncodeInpaintConditioning')
         self.assertNotIn('6', graph)
-        self.assertEqual(graph['9']['inputs']['latent_image'], ['25', 2])
+        self.assertEqual(graph['49']['inputs']['latent_image'], ['21', 3])
         self.assertFalse(any(path == '/interrupt' for _, path, _ in self.calls))
 
 

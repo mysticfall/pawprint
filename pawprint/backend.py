@@ -133,6 +133,12 @@ def _prefer(names, token):
     return matches[0] if matches else (names[0] if names else None)
 
 
+def _combo_options(spec):
+    # Newer servers expose combos as [type, config] with the options inside
+    # the config.
+    return spec[0] if isinstance(spec[0], list) else spec[1].get('options', [])
+
+
 # One union ControlNet loader serves depth guidance.
 CONTROLNET_NODES = {'ControlNetLoader', 'ControlNetApplyAdvanced', 'SetUnionControlNetType'}
 IPADAPTER_NODES = {'IPAdapterModelLoader', 'IPAdapterAdvanced', 'CLIPVisionLoader'}
@@ -143,8 +149,13 @@ IPADAPTER_ENCODERS = {'vit-h': 'CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors',
 # SetUnionControlNetType.
 UNION_MODELS = {'sdxl_promax.safetensors'}
 REQUIRED = {'CheckpointLoaderSimple', 'LoadImage', 'ImageToMask', 'VAEEncode',
-             'SetLatentNoiseMask', 'CLIPSetLastLayer', 'CLIPTextEncode', 'KSampler', 'VAEDecode',
-            'PreviewImage', 'InpaintModelConditioning', 'ImageCompositeMasked'}
+            'SetLatentNoiseMask', 'CLIPSetLastLayer', 'CLIPTextEncode', 'KSampler', 'VAEDecode',
+            'PreviewImage', 'SelfAttentionGuidance', 'DifferentialDiffusion',
+            'INPAINT_VAEEncodeInpaintConditioning', 'INPAINT_LoadFooocusInpaint',
+            'INPAINT_ApplyFooocusInpaint', 'INPAINT_LoadInpaintModel',
+            'INPAINT_InpaintWithModel', 'INPAINT_ExpandMask', 'INPAINT_StabilizeMask',
+            'INPAINT_ColorMatch', 'RandomNoise', 'KSamplerSelect', 'BasicScheduler',
+            'CFGGuider', 'SplitSigmas', 'SamplerCustomAdvanced'}
 ZIT_REQUIRED = {'UNETLoader', 'CLIPLoader', 'VAELoader', 'CLIPSetLastLayer', 'CLIPTextEncode',
                 'ConditioningZeroOut', 'ModelSamplingAuraFlow', 'VAEEncode',
                 'SetLatentNoiseMask', 'KSampler', 'VAEDecode', 'LoadImage', 'PreviewImage',
@@ -175,7 +186,7 @@ def capabilities(info):
     caps['adapters'] = dict(SDXL=not sdxl_missing, ZIT=not zit_missing)
     caps['checkpoints'] = caps['controlnet_models'] = caps['ipadapter_models'] = []
     caps['zit_unets'] = caps['zit_loras'] = caps['zit_controlnets'] = []
-    caps['zit_inpaint'] = None
+    caps['zit_inpaint'] = caps['sdxl_inpaint'] = None
     caps['loras'] = []
     caps['samplers'] = caps['schedulers'] = []
     caps['ranges'] = {}
@@ -193,6 +204,10 @@ def capabilities(info):
                 encoder = encoder_for(name)
                 if encoder and encoder in encoders:
                     caps['ipadapter_models'].append(name)
+        # The pre-fill stage of full-denoise inpainting picks a dedicated
+        # inpaint model the way the CLIP/VAE names resolve.
+        caps['sdxl_inpaint'] = _prefer(_combo_options(
+            info['INPAINT_LoadInpaintModel']['input']['required']['model_name']), 'mat')
     if not zit_missing:
         caps['zit_unets'] = info['UNETLoader']['input']['required']['unet_name'][0]
         # Style LoRAs live in the zit folder; the folder prefix is part of the
@@ -204,12 +219,9 @@ def capabilities(info):
         if ZIT_CONTROLNET_NODES <= info.keys():
             caps['zit_controlnets'] = info['ModelPatchLoader']['input']['required']['name'][0]
         # The pre-fill stage of full-denoise inpainting picks a dedicated
-        # inpaint model the way the CLIP/VAE names resolve. Newer servers
-        # expose combos as [type, config] with the options inside the config.
-        model_spec = info['INPAINT_LoadInpaintModel']['input']['required']['model_name']
-        model_names = model_spec[0] if isinstance(model_spec[0], list) \
-            else model_spec[1].get('options', [])
-        caps['zit_inpaint'] = _prefer(model_names, 'mat')
+        # inpaint model the way the CLIP/VAE names resolve.
+        caps['zit_inpaint'] = _prefer(_combo_options(
+            info['INPAINT_LoadInpaintModel']['input']['required']['model_name']), 'mat')
     if 'LoraLoaderModelOnly' in info:
         # Every server LoRA is offered to SDXL; the ZIT table filters to zit/
         # weights through caps['zit_loras'] above.
@@ -274,10 +286,13 @@ def validate(settings, caps):
     if settings.get('depth_enabled'):
         if settings['controlnet_model'] not in caps['controlnet_models']:
             raise ValueError(f"ControlNet model is not available on this server: {settings['controlnet_model']}")
+    # Full-denoise selections additionally need the pre-fill inpaint model.
+    if settings.get('masked') and settings.get('denoise', 1.0) >= 1.0 and not caps.get('sdxl_inpaint'):
+        raise ValueError('Inpaint model is not available on this server')
     _validate_numeric(settings, caps)
 
 
-def _sdxl_workflow(settings, image, mask, depth=None, reference=None):
+def _sdxl_workflow(settings, image, mask, depth=None, reference=None, caps=None):
     def node(kind, **inputs):
         return dict(class_type=kind, inputs=inputs)
     graph = {
@@ -288,12 +303,6 @@ def _sdxl_workflow(settings, image, mask, depth=None, reference=None):
         '24': node('CLIPSetLastLayer', clip=['1', 1], stop_at_clip_layer=-settings['clip_skip']),
         '7': node('CLIPTextEncode', clip=['24', 0], text=settings['positive']),
         '8': node('CLIPTextEncode', clip=['24', 0], text=settings['negative']),
-        '9': node('KSampler', model=None,
-                  seed=int(settings['seed']), steps=settings['steps'],
-                  cfg=settings['cfg'], sampler_name=settings['sampler'],
-                  scheduler=settings['scheduler'], denoise=settings['denoise']),
-        '11': node('VAEDecode', samples=['9', 0], vae=['1', 2]),
-        '10': node('PreviewImage', images=['11', 0]),
     }
     # The per-layer LoRA stack chains on top of the checkpoint in listed
     # order; ModelOnly loaders leave the CLIP untouched.
@@ -303,8 +312,6 @@ def _sdxl_workflow(settings, image, mask, depth=None, reference=None):
         graph[key] = node('LoraLoaderModelOnly', model=model,
                           lora_name=lora['name'], strength_model=lora['strength'])
         model = [key, 0]
-    graph['9']['inputs']['model'] = model
-    latent = None
     positive, negative = ['7', 0], ['8', 0]
 
     def loader():
@@ -322,27 +329,6 @@ def _sdxl_workflow(settings, image, mask, depth=None, reference=None):
                            control_net=['23', 0], image=['12', 0], vae=['1', 2],
                            strength=settings['depth_strength'], start_percent=0.0, end_percent=1.0)
         positive, negative = ['14', 0], ['14', 1]
-    if settings.get('masked'):
-        # A selection means model-level inpainting: InpaintModelConditioning
-        # takes the conditioned text (after any depth apply), VAE-encodes the
-        # input itself and attaches the noise mask, producing both the final
-        # conditioning and the latent. ImageCompositeMasked then rebuilds the
-        # output so pixels outside the mask stay exactly the original input.
-        graph['25'] = node('InpaintModelConditioning', positive=positive, negative=negative,
-                           vae=['1', 2], pixels=['2', 0], mask=['4', 0], noise_mask=True)
-        graph['28'] = node('ImageCompositeMasked', destination=['2', 0], source=['11', 0],
-                           mask=['4', 0], x=0, y=0, resize_source=False)
-        graph['10']['inputs']['images'] = ['28', 0]
-        # InpaintModelConditioning emits conditioning (slots 0/1) and the
-        # noise-masked latent (slot 2); the sampler takes all three directly.
-        positive, negative, latent = ['25', 0], ['25', 1], ['25', 2]
-    else:
-        # Without a selection the whole frame updates as ordinary img2img; the
-        # latent always comes from the rendered composite, even at full denoise.
-        graph['5'] = node('VAEEncode', pixels=['2', 0], vae=['1', 2])
-        graph['6'] = node('SetLatentNoiseMask', samples=['5', 0], mask=['4', 0])
-        latent = ['6', 0]
-    graph['9']['inputs'].update(positive=positive, negative=negative, latent_image=latent)
     if settings.get('ipadapter_enabled'):
         if reference is None:
             raise ValueError('IPAdapter reference image is missing')
@@ -355,7 +341,73 @@ def _sdxl_workflow(settings, image, mask, depth=None, reference=None):
                            weight=settings['ipadapter_weight'], weight_type='linear',
                            combine_embeds='concat', start_at=0.0, end_at=1.0,
                            embeds_scaling='K+V w/ C penalty', clip_vision=['16', 0])
-        graph['9']['inputs'].update(model=['18', 0])
+        model = ['18', 0]
+    if settings.get('masked'):
+        # A selection follows the confirmed external reference pipelines: the
+        # Fooocus inpaint patch joins the model chain and the advanced
+        # sampling stack replaces the plain sampler. At full denoise a
+        # dedicated inpaint model pre-fills the selection first and the sigma
+        # schedule runs whole; below full denoise the original pixels refine
+        # directly with a split schedule. Both paths re-match colors against
+        # the pixels fed to the VAE outside the selection; patch placement
+        # back onto the layer stays client-side.
+        full = settings['denoise'] >= 1.0
+        feather = settings.get('feather', 0)
+        graph['26'] = node('INPAINT_ExpandMask', mask=['4', 0], grow=feather,
+                           blur=int(feather * 1.7), blur_type='linear')
+        source = ['26', 0]
+        pixels = ['2', 0]
+        if full:
+            graph['27'] = node('INPAINT_StabilizeMask', mask=['26', 0], epsilon=0.01)
+            source = ['27', 0]
+            graph['33'] = node('INPAINT_ExpandMask', mask=['4', 0], grow=4, blur=0,
+                               blur_type='gaussian')
+            graph['42'] = node('INPAINT_LoadInpaintModel',
+                               model_name=(caps or {}).get('sdxl_inpaint'))
+            graph['43'] = node('INPAINT_InpaintWithModel', inpaint_model=['42', 0],
+                               image=['2', 0], mask=['33', 0], seed=int(settings['seed']))
+            pixels = ['43', 0]
+        graph['25'] = node('SelfAttentionGuidance', model=model, scale=0.5, blur_sigma=2.0)
+        graph['29'] = node('DifferentialDiffusion', model=['25', 0])
+        # Inpaint conditioning emits positive/negative (slots 0/1), the
+        # Fooocus patch latent (slot 2) and the noise-masked latent (slot 3).
+        graph['21'] = node('INPAINT_VAEEncodeInpaintConditioning', vae=['1', 2],
+                           pixels=pixels, mask=source, positive=positive, negative=negative)
+        graph['22'] = node('INPAINT_LoadFooocusInpaint',
+                           head='fooocus_inpaint_head.pth', patch='inpaint_v26.fooocus.patch')
+        graph['31'] = node('INPAINT_ApplyFooocusInpaint', model=['29', 0],
+                           patch=['22', 0], latent=['21', 2])
+        graph['44'] = node('RandomNoise', noise_seed=int(settings['seed']))
+        graph['45'] = node('KSamplerSelect', sampler_name=settings['sampler'])
+        graph['46'] = node('CFGGuider', model=['31', 0], positive=['21', 0],
+                           negative=['21', 1], cfg=settings['cfg'])
+        graph['47'] = node('BasicScheduler', model=['31', 0],
+                           scheduler=settings['scheduler'], steps=settings['steps'], denoise=1.0)
+        sigmas = ['47', 0]
+        if not full:
+            # The schedule keeps full-length sigmas and enters at the step the
+            # denoise strength skips, as in the reference refine workflow.
+            graph['48'] = node('SplitSigmas', sigmas=['47', 0],
+                               step=round(settings['steps'] * (1 - settings['denoise'])))
+            sigmas = ['48', 1]
+        graph['49'] = node('SamplerCustomAdvanced', noise=['44', 0], guider=['46', 0],
+                           sampler=['45', 0], sigmas=sigmas, latent_image=['21', 3])
+        graph['41'] = node('VAEDecode', samples=['49', 1], vae=['1', 2])
+        graph['56'] = node('INPAINT_ColorMatch', target=['41', 0], reference=pixels,
+                           exclude_mask=source, strength=1.0)
+        graph['10'] = node('PreviewImage', images=['56', 0])
+        return graph
+    # Without a selection the whole frame updates as ordinary img2img; the
+    # latent always comes from the rendered composite, even at full denoise.
+    graph['9'] = node('KSampler', model=model, seed=int(settings['seed']),
+                      steps=settings['steps'], cfg=settings['cfg'],
+                      sampler_name=settings['sampler'], scheduler=settings['scheduler'],
+                      denoise=settings['denoise'], positive=positive, negative=negative,
+                      latent_image=['6', 0])
+    graph['5'] = node('VAEEncode', pixels=['2', 0], vae=['1', 2])
+    graph['6'] = node('SetLatentNoiseMask', samples=['5', 0], mask=['4', 0])
+    graph['11'] = node('VAEDecode', samples=['9', 0], vae=['1', 2])
+    graph['10'] = node('PreviewImage', images=['11', 0])
     return graph
 
 
@@ -467,7 +519,7 @@ def workflow(settings, image, mask, depth=None, reference=None, caps=None):
         # Guidance is a DiffSynth model patch; conditioning stays plain text
         # with a zeroed negative.
         return _zit_workflow(settings, image, mask, depth, caps=caps)
-    return _sdxl_workflow(settings, image, mask, depth, reference)
+    return _sdxl_workflow(settings, image, mask, depth, reference, caps=caps)
 
 
 class Client:
