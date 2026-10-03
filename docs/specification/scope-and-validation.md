@@ -1,5 +1,25 @@
 # Scope and validation
 
+## Target-focused geometry-depth guidance
+
+Geometry guidance now measures its depth range from visible hits on the active
+target object within the generation context crop, not surrounding objects across
+the full saved frame. Near/far use the 0.5/99.5 percentiles with clamping; unrelated
+geometry is black and still occludes the target. Crops without visible target hits
+fall back to all visible geometry inside the crop. Flat-depth surfaces remain
+white, and empty geometry remains an error. Preview and Generate share this path
+for both adapters; stored projection visibility snapshots remain raw full-scene
+depth and are not modified by guidance capture.
+
+`tools/depth_guidance_test.py` passes in factory headless Blender 5.2.2, covering
+contrast versus distant background, target outliers, non-target exclusion,
+foreground occlusion, crop-local range, off-target fallback, deterministic PNG
+output and unchanged visibility snapshots. Backend tests and the headless
+registration/reload smoke check pass, as do Cycles/Eevee projection-render and
+save/reopen regressions. The user confirmed the brighter live depth preview;
+the exact saved-view export was also inspected through Blender MCP. Live ComfyUI
+generation remains unverified for this slice.
+
 ## Current slice: SDXL reference inpaint pipelines (version unchanged at 0.2.0)
 
 The user supplied two reference ComfyUI workflows, `workflow-inpaint-replace.json`

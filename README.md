@@ -220,6 +220,8 @@ materials are not baked into the initial gray base.
       `sdxl_promax.safetensors` and set **Depth strength** (default 0.5). Geometry is
       the default source. **Preview Geometry Depth**
       opens the exact guidance crop in the Image Editor; Shift-F5 returns to 3D.
+      Depth contrast uses the visible target inside this crop with percentile
+      clamping; unrelated objects are black (all-geometry fallback for off-target crops).
       Z Image Turbo layers get the same **Depth guidance** toggle, applied through
       a DiffSynth ControlNet patch: **Model Patch Loader** plus the **Apply Qwen
       Image DiffSynth ControlNet** node with the Fun ControlNet Union weights

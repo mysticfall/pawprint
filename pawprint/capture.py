@@ -141,36 +141,45 @@ def save_reference(path, reference):
         bpy.data.images.remove(image)
 
 
-def geometry_depth(context, layer, directory, metadata):
+def normalize_geometry_depth(target, scene):
+    """Focus on visible target depths, falling back to scene depths if absent."""
+    scene_valid = np.isfinite(scene) & (scene > 0)
+    # Separate BVHs may differ slightly in floating-point intersection results.
+    tolerance = np.maximum(1e-6, np.abs(scene) * 1e-6)
+    valid = (np.isfinite(target) & (target > 0) & scene_valid
+             & (target <= scene + tolerance))
+    depths = target
+    if not np.any(valid):
+        depths, valid = scene, scene_valid
+    if not np.any(valid):
+        raise ValueError('No visible geometry in the saved depth-guidance frame')
+    near, far = np.percentile(depths[valid], [0.5, 99.5])
+    values = np.zeros_like(depths)
+    if far - near <= max(1e-6, far * 1e-6):
+        values[valid] = 1
+    else:
+        values[valid] = np.clip((far - depths[valid]) / (far - near), 0, 1)
+    return values
+
+
+def geometry_depth(context, layer, directory, metadata, target_object):
     """Fresh geometry guidance, independent of the layer's old visibility snapshot.
 
-    Normalize positive camera-space depth across the full saved frame before
-    cropping. Near is white, far/background black; a constant-depth surface is
-    white. All viewport-visible surfaces participate, including other objects.
+    Normalize visible target depths inside the request crop using robust
+    percentiles. Other surfaces are black unless no target is visible in the crop.
+    This never changes the layer's stored projection visibility snapshot.
     """
     from types import SimpleNamespace
     frame = SimpleNamespace(width=layer.image.size[0], height=layer.image.size[1],
                             view_matrix=layer.view_matrix, projection=layer.projection,
                             clip_start=layer.clip_start, clip_end=layer.clip_end)
-    image = projection.depth_image(context, frame, context.space_data)
-    try:
-        depths = pixels(image)[:, :, 0]
-        valid = np.isfinite(depths) & (depths > 0)
-        if not np.any(valid):
-            raise ValueError('No visible geometry in the saved depth-guidance frame')
-        near, far = float(depths[valid].min()), float(depths[valid].max())
-        values = np.zeros_like(depths)
-        if far - near <= max(1e-6, far * 1e-6):
-            values[valid] = 1
-        else:
-            values[valid] = (far - depths[valid]) / (far - near)
-        rgba = np.ones((*depths.shape, 4), dtype=np.float32)
-        rgba[:, :, :3] = values[:, :, None]
-        x0, y0, x1, y1 = metadata['bounds']
-        save_input(directory / 'depth.png', rgba[y0:y1, x0:x1],
-                   metadata['request_size'], non_color=True)
-    finally:
-        bpy.data.images.remove(image)
+    scene = projection.frame_depths(context, frame, context.space_data)
+    target = projection.frame_depths(context, frame, context.space_data, target_object)
+    x0, y0, x1, y1 = metadata['bounds']
+    values = normalize_geometry_depth(target[y0:y1, x0:x1], scene[y0:y1, x0:x1])
+    rgba = np.ones((*values.shape, 4), dtype=np.float32)
+    rgba[:, :, :3] = values[:, :, None]
+    save_input(directory / 'depth.png', rgba, metadata['request_size'], non_color=True)
 
 
 def returned_pixels(path, frame_size, metadata):

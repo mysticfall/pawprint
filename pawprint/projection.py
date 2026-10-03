@@ -50,12 +50,14 @@ def capture_view(stack, space, region):
     stack.clip_end = space.clip_end
 
 
-def visible_geometry(context, space=None):
+def visible_geometry(context, space=None, only_original=None):
     """Snapshot evaluated, viewport-visible surface geometry, including instances."""
     depsgraph = context.evaluated_depsgraph_get()
     vertices, triangles = [], []
     for instance in depsgraph.object_instances:
         obj = instance.object
+        if only_original is not None and obj.original != only_original.original:
+            continue
         visibility_owner = instance.parent if instance.is_instance else obj
         original = visibility_owner.original
         if not instance.show_self or not original.visible_get(view_layer=context.view_layer, viewport=space):
@@ -76,13 +78,14 @@ def visible_geometry(context, space=None):
     return BVHTree.FromPolygons(vertices, triangles, all_triangles=True) if triangles else None
 
 
-def depth_image(context, stack, space=None):
-    """Store positive view-space depth at pixel centers; zero denotes empty space."""
-    tree = visible_geometry(context, space)
+def frame_depths(context, stack, space=None, only_original=None):
+    """Raycast positive view-space depths; zero denotes empty space."""
+    import numpy as np
+    tree = visible_geometry(context, space, only_original)
     view = matrix(stack.view_matrix)
     inverse = matrix(stack.projection).inverted()
     eye = view.inverted().translation
-    pixels = array('f', [0.0]) * (stack.width * stack.height * 4)
+    depths = np.zeros((stack.height, stack.width), dtype=np.float32)
     for y in range(stack.height):
         for x in range(stack.width):
             point = inverse @ Vector((2 * (x + 0.5) / stack.width - 1,
@@ -92,11 +95,19 @@ def depth_image(context, stack, space=None):
             origin = eye + direction * (stack.clip_start / forward)
             hit = tree.ray_cast(origin, direction, (stack.clip_end - stack.clip_start) / forward)[0] if tree else None
             depth = -(view @ hit).z if hit is not None else 0.0
-            index = (y * stack.width + x) * 4
-            pixels[index:index + 4] = array('f', (depth, depth, depth, 1))
+            depths[y, x] = depth
+    return depths
+
+
+def depth_image(context, stack, space=None):
+    """Store positive view-space depth at pixel centers; zero denotes empty space."""
+    import numpy as np
+    depths = frame_depths(context, stack, space)
+    pixels = np.ones((stack.height, stack.width, 4), dtype=np.float32)
+    pixels[:, :, :3] = depths[:, :, None]
     image = bpy.data.images.new("Pawprint Visibility Depth", stack.width, stack.height, float_buffer=True)
     image.colorspace_settings.name = 'Non-Color'
-    image.pixels.foreach_set(pixels)
+    image.pixels.foreach_set(pixels.ravel())
     image.update()
     image.pack()
     return image

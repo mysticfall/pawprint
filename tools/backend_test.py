@@ -720,6 +720,8 @@ class BackendTest(unittest.TestCase):
         self.assertEqual(zit_depth['picker'], 'zit_controlnet')
         self.assertEqual(zit_depth['choices'], 'zit_controlnets')
         self.assertEqual(zit_depth['strength'], 'zit_strength')
+        self.assertEqual(zit_depth['preview'], 'pawprint.preview_depth')
+        self.assertEqual(zit_depth['source'], 'Source: Geometry')
         sdxl_reference = next(s for s in sdxl if s.get('concept') == 'reference')
         self.assertEqual(sdxl_reference['image'], 'ipadapter_image')
         self.assertEqual(sdxl_reference['weight'], 'ipadapter_weight')

@@ -79,7 +79,8 @@ Each table is an ordered tuple of descriptor kinds:
 
 SDXL declares depth (union ControlNet picker, Source: Geometry label,
 strength, depth preview) and reference (IPAdapter image/model/weight); ZIT
-declares depth (DiffSynth patch picker and strength) only. The RNA properties
+declares depth (DiffSynth patch picker, strength, geometry source label and the
+same depth preview) only. The RNA properties
 and the backend workflows are unchanged — this slice moves only presentation
 into the tables. One small behavior change fell out of the rewrite: the SDXL
 union ControlNet picker now sits inside the depth-enabled block, where it
@@ -195,9 +196,14 @@ implemented source; composite estimation is not yet offered as an executable opt
 
 The map is freshly raycast against evaluated viewport-visible geometry at the
 saved view, including surrounding objects. It does not reuse or modify the layer's
-static visibility snapshot. Positive camera-space depth is normalized across the
-full frame: near white, far/background black; a constant-depth surface is white.
-It then receives exactly the image/mask crop and request dimensions. The map is
+static visibility snapshot. Positive camera-space depth is normalized from visible
+hits on the active target object inside the generation context crop, using the
+0.5/99.5 percentiles with clamping: near white, far black; a constant-depth surface
+is white. Other objects and empty background are black, and foreground occluders
+still hide the target. If the crop contains no visible target hits, normalization
+falls back to all visible geometry inside that crop. The target includes its
+evaluated instances and all material slots. It receives exactly the image/mask
+crop and request dimensions. The map is
 Non-Color, independent of materials and display transforms. Preview works without
 ComfyUI, opens a packed Image datablock in the current editor, and uses the same
 crop/resizing as Generate. Shift-F5 returns to the 3D View.
@@ -215,7 +221,8 @@ was superseded by the shared union design; those plain depth weights are no
 longer wired.
 
 Raycasting inherits projection-capture limits: surfaces are solid, with no shader
-displacement or volumetric depth. Distant visible geometry influences normalization.
+displacement or volumetric depth. Percentile clamping preserves contrast against
+rare target-depth outliers but cannot invent detail on constant-depth geometry.
 Guidance adds structural evidence; it does not guarantee a particular generated
 texture or recover detail absent from geometry. The RGB input remains the current
 visible composite with normal scene lighting.

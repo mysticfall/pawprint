@@ -432,7 +432,7 @@ class PAWPRINT_OT_generate(bpy.types.Operator):
             # Depth guidance is adapter-independent; the worker uploads the
             # freshly written depth.png for whichever graph consumes it.
             if settings['depth_enabled']:
-                capture.geometry_depth(context, layer, directory, metadata)
+                capture.geometry_depth(context, layer, directory, metadata, context.object)
             if settings['adapter'] == 'SDXL' and settings['ipadapter_enabled']:
                 if layer.generation_ipadapter_image is None:
                     raise ValueError('IPAdapter needs a reference image in the Guidance panel')
@@ -720,7 +720,7 @@ class PAWPRINT_OT_preview_depth(bpy.types.Operator):
             size = tuple(max(64, round(value * scale / 8) * 8) for value in (width, height))
             with tempfile.TemporaryDirectory(prefix='pawprint-depth-preview-') as temp:
                 directory = Path(temp)
-                capture.geometry_depth(context, layer, directory, dict(bounds=bounds, request_size=size))
+                capture.geometry_depth(context, layer, directory, dict(bounds=bounds, request_size=size), context.object)
                 image = bpy.data.images.load(str(directory / 'depth.png'), check_existing=False)
                 image.name = 'Pawprint Geometry Depth Preview'
                 image.colorspace_settings.name = 'Non-Color'

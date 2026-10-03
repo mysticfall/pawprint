@@ -36,7 +36,10 @@ User-facing SDXL generation now supports per-layer positive/negative prompts,
 denoise/CFG/seed/sampling steps, sampler/scheduler and context resolution. Clean
 saved-view capture, isolated-process ComfyUI jobs, cancellation/stale-target guards,
  and native clone result undo are integrated. Optional SDXL geometry-depth guidance
-with preview and strength is implemented; composite-estimated depth is explicitly deferred.
+with preview and strength is implemented; normalization uses visible target hits
+inside the generation crop with 0.5/99.5 percentile clamping, unrelated surfaces
+black, and all-geometry fallback for crops without target hits. Projection visibility
+snapshots remain full-scene raw depth. Composite-estimated depth is explicitly deferred.
 IPAdapter reference conditioning (native image datablock, discovered model with
 paired CLIP Vision encoder, weight, uncropped upload) composes with depth guidance.
 Depth guidance uses one union ControlNet (default Xinsir Pro Max
