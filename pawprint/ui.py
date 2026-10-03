@@ -125,6 +125,46 @@ class PAWPRINT_PT_layers(bpy.types.Panel):
             material_view_hint(layout, context)
 
 
+def draw_review(layout, context):
+    info = generation.review_info()
+    if not info or not generation.review_context(context):
+        return
+    column = layout.column(align=True)
+    seed = info['seed']
+    column.label(text=f"Candidate {info['index'] + 1}/{info['count']} · seed "
+                      f"{seed if len(seed) <= 16 else seed[:15] + '…'}")
+    row = column.row(align=True)
+    row.operator('pawprint.candidate_select', text='Previous').direction = -1
+    row.operator('pawprint.candidate_select', text='Next').direction = 1
+    row = column.row(align=True)
+    for version, label in [('ORIGINAL', 'Original'), ('ALBEDO', 'Albedo + Normal')]:
+        row.operator('pawprint.candidate_version', text=label,
+                     depress=info['version'] == version).version = version
+    row = column.row(align=True)
+    for editor, label in [('VIEW_3D', 'Viewport'), ('IMAGE_EDITOR', 'Image Editor')]:
+        row.operator('pawprint.candidate_editor', text=label,
+                     depress=context.area.type == editor).editor = editor
+    column.label(text='Apply / Layer use albedo + normal (1.0).', icon='INFO')
+    row = column.row(align=True)
+    row.operator('pawprint.commit_candidate', text='Apply', icon='CHECKMARK')
+    row.operator('pawprint.candidate_layer', text='Layer', icon='ADD')
+    row.operator('pawprint.discard_candidates', text='Discard', icon='X')
+
+
+class PAWPRINT_PT_image_review(bpy.types.Panel):
+    bl_label = 'Generation Review'
+    bl_space_type = 'IMAGE_EDITOR'
+    bl_region_type = 'UI'
+    bl_category = 'Pawprint'
+
+    @classmethod
+    def poll(cls, context):
+        return generation.review_context(context)
+
+    def draw(self, context):
+        draw_review(self.layout, context)
+
+
 class PAWPRINT_PT_generation(bpy.types.Panel):
     bl_label = "Generation"
     bl_idname = "PAWPRINT_PT_generation"
@@ -138,20 +178,7 @@ class PAWPRINT_PT_generation(bpy.types.Panel):
         layout = self.layout
         if material_view_hint(layout, context):
             layer = None
-        info = generation.review_info()
-        if info:
-            column = layout.column(align=True)
-            seed = info['seed']
-            column.label(text=f"Candidate {info['index'] + 1}/{info['count']} · seed "
-                              f"{seed if len(seed) <= 16 else seed[:15] + '…'}")
-            row = column.row(align=True)
-            row.operator('pawprint.candidate_select', text='Previous').direction = -1
-            row.operator('pawprint.candidate_select', text='Next').direction = 1
-            row = column.row(align=True)
-            row.operator('pawprint.commit_candidate', text='Apply', icon='CHECKMARK')
-            row.operator('pawprint.candidate_layer', text='Layer', icon='ADD')
-            row.operator('pawprint.discard_candidates', text='Discard', icon='X')
-            column.label(text='The viewport stays interactive while reviewing.', icon='INFO')
+        draw_review(layout, context)
         column = layout.column(align=True)
         column.enabled = not generation.active()
         column.prop(context.scene, 'pawprint_server', text='Server')
@@ -182,6 +209,10 @@ class PAWPRINT_PT_generation(bpy.types.Panel):
             row.prop(layer, 'generation_padding')
             column.prop(layer, 'generation_preview')
             column.operator('pawprint.preview_context', icon='IMAGE_DATA')
+            column.label(text='Generate → Chord albedo + normal → Review', icon='INFO')
+            column.label(text='Selected albedo matches existing boundary texture.', icon='INFO')
+            if generation.connected(context) and not generation.chord_ready():
+                column.label(text='Chord model/nodes required.', icon='ERROR')
             column.operator('pawprint.generate', icon='RENDER_STILL')
         if generation.active():
             layout.operator('pawprint.cancel_generation', icon='CANCEL')
@@ -217,6 +248,10 @@ class PAWPRINT_PT_layer_details(bpy.types.Panel):
             layout.prop(layer, 'mirror')
         layout.label(text='Committed UV base')
         layout.template_ID(stack, 'base')
+        normal = layout.column()
+        normal.enabled = not generation.active()
+        normal.label(text='UV tangent normal · Non-Color / +Y')
+        normal.template_ID(stack, 'base_normal')
         row = layout.row(align=True)
         row.prop(context.scene, 'pawprint_base_width')
         row.prop(context.scene, 'pawprint_base_height')
@@ -328,6 +363,11 @@ class PAWPRINT_PT_pbr(bpy.types.Panel):
     bl_region_type = 'UI'
     bl_category = 'Pawprint'
 
+    @classmethod
+    def poll(cls, context):
+        stack = displayed_stack(context)
+        return bool(stack and (stack.pbr_material or in_material_view(context)))
+
     def draw(self, context):
         layout = self.layout
         stack = displayed_stack(context)
@@ -346,17 +386,7 @@ class PAWPRINT_PT_pbr(bpy.types.Panel):
                 layout.prop(stack, 'pbr_material', text='Material')
             layout.label(text='Roughness and metalness stay at Principled defaults.', icon='INFO')
             return
-        if generation.active():
-            layout.label(text='Estimating albedo and normal maps…', icon='RENDER_STILL')
-            return
-        if not generation.connected(context):
-            layout.label(text='Connect in Generation to estimate maps.', icon='INFO')
-        elif not generation.chord_ready():
-            layout.label(text='No Chord model found on this server.', icon='ERROR')
-        else:
-            layout.operator('pawprint.estimate_pbr', icon='SHADING_TEXTURE')
-        if stack.pbr_material:
-            layout.label(text='Estimating again rebuilds the material with fresh maps.', icon='INFO')
+        layout.label(text='Generated layers already contain Chord albedo.', icon='INFO')
 
 
 def draw_prompt_history(layout, history, negative):
@@ -394,6 +424,7 @@ CLASSES = (
     PAWPRINT_PT_context,
     PAWPRINT_PT_layers,
     PAWPRINT_PT_generation,
+    PAWPRINT_PT_image_review,
     PAWPRINT_PT_layer_details,
     PAWPRINT_PT_new_layer,
     PAWPRINT_PT_pbr,

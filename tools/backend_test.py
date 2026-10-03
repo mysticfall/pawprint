@@ -24,7 +24,10 @@ class BackendTest(unittest.TestCase):
         self.calls = []
         self.mode = 'cancel'
         self.prompts = 0
+        self.cancel_at = 2
         self.info = {name: {} for name in backend.REQUIRED}
+        self.info.update({name: {} for name in backend.CHORD_REQUIRED})
+        self.info['ChordLoadModel'] = {'input': {'required': {'ckpt_name': [['chord_v1.safetensors']]}}}
         self.info['CheckpointLoaderSimple'] = {'input': {'required': {'ckpt_name': [['test.safetensors']]}}}
         self.info['INPAINT_LoadInpaintModel'] = {'input': {'required': {'model_name': [[
             'MAT_Places512_G_fp16.safetensors', 'lama_large_512px.safetensors']]}}}
@@ -47,12 +50,18 @@ class BackendTest(unittest.TestCase):
                 owner.calls.append(('GET', self.path, None))
                 if self.path == '/object_info':
                     self.respond(owner.info)
-                elif owner.mode in ('batch', 'batch_cancel') and self.path.startswith('/history/'):
+                elif owner.mode in ('chord_error', 'chord_missing') and owner.prompts == 2 and self.path.startswith('/history/'):
+                    self.respond({self.path[len('/history/'):]: {
+                        'status': {'status_str': 'error' if owner.mode == 'chord_error' else 'success',
+                                    'completed': True, 'messages': ['out of memory']},
+                        'outputs': {'10': {'images': [{'filename': 'albedo.png', 'subfolder': '', 'type': 'temp'}]}}}})
+                elif owner.mode in ('batch', 'batch_cancel', 'chord_error', 'chord_missing') and self.path.startswith('/history/'):
                     self.respond({self.path[len('/history/'):]: {
                         'status': {'status_str': 'success', 'completed': True},
-                        'outputs': {'10': {'images': [
-                            {'filename': 'result.png', 'subfolder': '', 'type': 'temp'}]}}}})
-                elif owner.mode in ('batch', 'batch_cancel', 'estimate') and self.path.startswith('/view'):
+                         'outputs': {'10': {'images': [
+                             {'filename': 'result.png', 'subfolder': '', 'type': 'temp'}]},
+                             '11': {'images': [{'filename': 'normal.png', 'subfolder': '', 'type': 'temp'}]}}}})
+                elif owner.mode in ('batch', 'batch_cancel', 'estimate', 'chord_error', 'chord_missing') and self.path.startswith('/view'):
                     self.send_response(200)
                     self.end_headers()
                     self.wfile.write(b'png bytes')
@@ -88,12 +97,12 @@ class BackendTest(unittest.TestCase):
                             (owner.directory / 'cancel').touch()
                         if owner.mode == 'batch_cancel':
                             owner.prompts += 1
-                            if owner.prompts == 2:
+                            if owner.prompts == owner.cancel_at:
                                 # Cancel once the first image is finished and the
                                 # second request is already submitted.
                                 (owner.directory / 'cancel').touch()
                             self.respond({'prompt_id': f'own-prompt-{owner.prompts}'})
-                        elif owner.mode == 'batch':
+                        elif owner.mode in ('batch', 'chord_error', 'chord_missing'):
                             owner.prompts += 1
                             self.respond({'prompt_id': f'own-prompt-{owner.prompts}'})
                         else:
@@ -610,13 +619,18 @@ class BackendTest(unittest.TestCase):
                         server=f'http://127.0.0.1:{self.server.server_port}'))
         backend.run(self.directory)
         prompts = [body for _, path, body in self.calls if path == '/prompt']
-        self.assertEqual(len(prompts), 3)
-        self.assertEqual([body['prompt']['9']['inputs']['seed'] for body in prompts], [11, 22, 33])
-        self.assertEqual(sum(path == '/upload/image' for _, path, _ in self.calls), 2)
+        self.assertEqual(len(prompts), 6)
+        self.assertEqual([body['prompt']['9']['inputs']['seed'] for body in prompts[:3]], [11, 22, 33])
+        for body in prompts[3:]:
+            self.assertEqual(body['prompt']['20']['class_type'], 'ChordMaterialEstimation')
+            self.assertIn('11', body['prompt'])
+        self.assertEqual(sum(path == '/upload/image' for _, path, _ in self.calls), 5)
         self.assertFalse(any(path == '/queue' for _, path, _ in self.calls))
         for index in range(3):
             self.assertEqual((self.directory / f'result-{index}.png').read_bytes(), b'png bytes')
-        self.assertEqual(json.loads((self.directory / 'progress.json').read_text()), {'done': 3, 'total': 3})
+            self.assertEqual((self.directory / f'original-{index}.png').read_bytes(), b'png bytes')
+        self.assertEqual(json.loads((self.directory / 'progress.json').read_text()),
+                          {'stage': 'Estimating albedo + normal', 'done': 3, 'total': 3})
         self.assertEqual(json.loads((self.directory / 'done.json').read_text())['seeds'], ['11', '22', '33'])
         # Cancelling mid-batch: the first image finished, the second was queued.
         # One /queue call must retire every prompt this worker owns together.
@@ -676,6 +690,7 @@ class BackendTest(unittest.TestCase):
         self.assertEqual(graph['11'], {'class_type': 'PreviewImage', 'inputs': {'images': ['9', 0]}})
 
     def test_estimate_without_chord_model_fails_before_upload(self):
+        del self.info['ChordLoadModel']
         caps = backend.capabilities(self.info)
         self.assertIsNone(caps['chord'])
         backend.publish(self.directory, 'request.json',
@@ -685,6 +700,36 @@ class BackendTest(unittest.TestCase):
         backend.run(self.directory)
         self.assertIn('Chord', json.loads((self.directory / 'done.json').read_text())['error'])
         self.assertFalse(any(method == 'POST' for method, _, _ in self.calls))
+
+    def test_generation_without_chord_fails_before_upload(self):
+        del self.info['ChordLoadModel']
+        backend.run(self.directory)
+        self.assertIn('Chord', json.loads((self.directory / 'done.json').read_text())['error'])
+        self.assertFalse(any(method == 'POST' for method, _, _ in self.calls))
+
+    def test_cancel_during_chord_retires_both_phases(self):
+        self.mode = 'batch_cancel'
+        self.cancel_at = 2  # single generation finished; Chord POST is in flight
+        backend.run(self.directory)
+        self.assertFalse(self.directory.exists())
+        deletes = [body for _, path, body in self.calls if path == '/queue']
+        self.assertEqual(deletes, [{'delete': ['own-prompt-1', 'own-prompt-2']}])
+        self.assertFalse(any(path in ('/interrupt', '/free') for _, path, _ in self.calls))
+
+    def test_chord_failure_never_publishes_a_reviewable_result(self):
+        self.mode = 'chord_error'
+        backend.run(self.directory)
+        self.assertIn('out of memory', json.loads((self.directory / 'done.json').read_text())['error'])
+        self.assertTrue((self.directory / 'original.png').exists())
+        self.assertFalse((self.directory / 'result.png').exists())
+        self.assertEqual([body for _, path, body in self.calls if path == '/queue'],
+                         [{'delete': ['own-prompt-1', 'own-prompt-2']}])
+
+    def test_chord_missing_albedo_is_an_error(self):
+        self.mode = 'chord_missing'
+        backend.run(self.directory)
+        self.assertIn('without paired albedo and normal', json.loads((self.directory / 'done.json').read_text())['error'])
+        self.assertFalse((self.directory / 'result.png').exists())
 
     def test_estimate_cancellation_deletes_only_own_prompt(self):
         for name in backend.CHORD_REQUIRED:

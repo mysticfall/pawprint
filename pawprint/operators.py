@@ -21,7 +21,7 @@ def viewport(context):
 class PAWPRINT_OT_create_stack(bpy.types.Operator):
     bl_idname = "pawprint.create_stack"
     bl_label = "Create Texture Stack"
-    bl_description = "Assign a new unlit Pawprint material to this slot, preserving the original material"
+    bl_description = "Assign a diffuse albedo Pawprint material to this slot, preserving the original material"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -51,7 +51,7 @@ class PAWPRINT_OT_create_stack(bpy.types.Operator):
         # Object-linked assignment avoids changing other users of the mesh data.
         slot.link = 'OBJECT'
         slot.material = material
-        self.report({'INFO'}, "Created unlit base; use Material Preview or Rendered shading")
+        self.report({'INFO'}, "Created albedo base; use Rendered shading for scene lighting")
         return {'FINISHED'}
 
 

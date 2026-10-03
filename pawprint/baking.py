@@ -7,7 +7,7 @@ import bmesh
 from . import model, projection, painting, generation
 
 
-def _bake(context, stack, last, name):
+def _bake(context, stack, last, name, *, normal=False):
     """Bake through layer ``last`` into a fresh packed image; originals untouched."""
     owner = context.object
     base = stack.base
@@ -43,10 +43,18 @@ def _bake(context, stack, last, name):
         temporary = material.pawprint
         for index in range(len(temporary.layers) - 1, last, -1):
             temporary.layers.remove(index)
-        projection.build_material(material)
+        # NORMAL baking evaluates the composed shader normal and expresses it in
+        # the mesh's UV tangent basis. Neutral detail must not encode curvature.
+        projection.build_material(material, emission=not normal)
         # Copy rather than overwrite: reference replacement + layer removal is
         # ordinary datablock undo, independent of direct image-pixel undo.
-        image = base.copy()
+        if normal and not stack.base_normal:
+            image = bpy.data.images.new(name, width=base.size[0], height=base.size[1],
+                                        alpha=True, float_buffer=True)
+            image.colorspace_settings.name = 'Non-Color'
+            image.generated_color = (.5, .5, 1, 1)
+        else:
+            image = (stack.base_normal if normal else base).copy()
         image.name = name
         image.filepath_raw = ''
         image.use_fake_user = False
@@ -60,6 +68,7 @@ def _bake(context, stack, last, name):
         mesh.materials.append(material)
         for face in mesh.polygons:
             face.material_index = 0
+        mesh.uv_layers.active = mesh.uv_layers[stack.uv_name]
         scene = bpy.data.scenes.new('Pawprint Temporary Bake')
         scene.render.engine = 'CYCLES'
         scene.cycles.device = 'CPU'
@@ -74,11 +83,15 @@ def _bake(context, stack, last, name):
         view_layer.update()
         with context.temp_override(scene=scene, view_layer=view_layer, object=obj,
                                    active_object=obj, selected_objects=[obj], selected_editable_objects=[obj]):
-            outcome = bpy.ops.object.bake(type='EMIT', target='IMAGE_TEXTURES',
+            outcome = bpy.ops.object.bake(type='NORMAL' if normal else 'EMIT', target='IMAGE_TEXTURES',
+                                          normal_space='TANGENT', normal_r='POS_X',
+                                          normal_g='POS_Y', normal_b='POS_Z',
                                           use_selected_to_active=False, use_clear=False,
                                           margin=8, margin_type='EXTEND', uv_layer=stack.uv_name)
         if outcome != {'FINISHED'}:
-            raise RuntimeError('UV emission bake did not finish')
+            raise RuntimeError('UV normal bake did not finish' if normal else 'UV emission bake did not finish')
+        if normal:
+            image['pawprint_normal_space'] = 'TANGENT'
         image.pack()
         success = True
         return image
@@ -129,11 +142,17 @@ class PAWPRINT_OT_commit_base(bpy.types.Operator):
     def execute(self, context):
         stack = model.active_stack(context)
         last = stack.active_index
+        image = normal_image = None
         try:
             image = bake_base(context, stack, last)
+            if stack.base_normal or any(layer.normal and layer.visible for layer in list(stack.layers)[:last + 1]):
+                normal_image = _bake(context, stack, last, 'Pawprint Committed Normal', normal=True)
         except Exception as exc:
+            if image:
+                bpy.data.images.remove(image)
             self.report({'ERROR'}, str(exc))
             return {'CANCELLED'}
+        stack.base_normal = normal_image
         stack.base = image
         if stack.commit_preserve:
             # Hidden sources avoid double compositing; removal stays available

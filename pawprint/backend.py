@@ -173,8 +173,7 @@ ZIT_REQUIRED = {'UNETLoader', 'CLIPLoader', 'VAELoader', 'CLIPSetLastLayer', 'CL
 # guidance (QwenImageDiffsynthControlnet).
 ZIT_CONTROLNET_NODES = {'ModelPatchLoader', 'QwenImageDiffsynthControlnet', 'ZImageFunControlnet'}
 # Chord material estimation (ComfyUI-Chord): tiled basecolor/normal estimation
-# from a flat composite. Missing Chord nodes only disable estimation; they
-# never block the generation adapters.
+# from each generated image. Chord is required before candidates enter review.
 CHORD_REQUIRED = {'ChordLoadModel', 'ChordMaterialEstimation', 'SplitImageToTileList',
                   'ImageMergeTileList', 'GetImageSize', 'PreviewImage'}
 # Estimate output nodes and the client-side files their images land in.
@@ -538,7 +537,7 @@ def workflow(settings, image, mask, depth=None, reference=None, caps=None):
     return _sdxl_workflow(settings, image, mask, depth, reference, caps=caps)
 
 
-def _chord_workflow(settings, image):
+def _chord_workflow(settings, image, *, albedo_only=False):
     """Tiled Chord estimation of albedo and normal maps from a flat composite.
 
     Follows the user's reference workflow ("Tiled Chord"): the input is split
@@ -548,7 +547,7 @@ def _chord_workflow(settings, image):
     """
     def node(kind, **inputs):
         return dict(class_type=kind, inputs=inputs)
-    return {
+    graph = {
         '1': node('ChordLoadModel', ckpt_name=settings['chord']),
         '2': node('LoadImage', image=image),
         '13': node('GetImageSize', image=['2', 0]),
@@ -563,6 +562,9 @@ def _chord_workflow(settings, image):
         '10': node('PreviewImage', images=['8', 0]),
         '11': node('PreviewImage', images=['9', 0]),
     }
+    if albedo_only:
+        del graph['9'], graph['11']
+    return graph
 
 
 class Client:
@@ -654,6 +656,8 @@ def run(directory):
             publish(directory, 'done.json', dict(maps=list(CHORD_OUTPUTS.values())))
             return
         validate(settings, caps)
+        if not caps.get('chord'):
+            raise ValueError('Generation requires Chord albedo estimation; install the Chord model and nodes')
         if (directory / 'cancel').exists():
             return
         # Both SDXL and ZIT graphs consume the mask (conditioning/noise mask).
@@ -669,13 +673,14 @@ def run(directory):
         # Batch requests resolve one random seed per candidate client-side;
         # single-image requests keep using the plain seed field.
         seeds = [str(seed) for seed in settings.get('seeds') or [settings['seed']]]
+        publish(directory, 'progress.json', dict(stage='Generated', done=0, total=len(seeds)))
         for index, seed in enumerate(seeds):
             if (directory / 'cancel').exists():
                 return
             graph = workflow(dict(settings, seed=seed), image, mask, depth, reference, caps)
             prompt_id = client.post('/prompt', json.dumps({'prompt': graph}).encode())['prompt_id']
             prompt_ids.append(prompt_id)
-            name = 'result.png' if len(seeds) == 1 else f'result-{index}.png'
+            name = 'original.png' if len(seeds) == 1 else f'original-{index}.png'
             expected.append(name)
             if len(seeds) == 1:
                 publish(directory, 'queued.json', dict(prompt_id=prompt_id))
@@ -689,7 +694,7 @@ def run(directory):
                     images = history.get('outputs', {}).get('10', {}).get('images', [])
                     if images:
                         (directory / name).write_bytes(client.get('/view?' + parse.urlencode(images[0])))
-                        publish(directory, 'progress.json', dict(done=index + 1, total=len(seeds)))
+                        publish(directory, 'progress.json', dict(stage='Generated', done=index + 1, total=len(seeds)))
                         break
                     if status.get('completed'):
                         raise RuntimeError('ComfyUI completed without an image')
@@ -697,6 +702,45 @@ def run(directory):
             else:
                 if not (directory / 'cancel').exists():
                     raise TimeoutError(f'Prompt {prompt_id} exceeded 20 minutes; running output will be discarded')
+        # Finish the generation batch before switching models. Separate prompts
+        # let ComfyUI's ModelPatcher memory manager offload diffusion models for
+        # Chord; never globally unload/interrupt another client's server work.
+        for index in range(len(seeds)):
+            if (directory / 'cancel').exists():
+                return
+            original = 'original.png' if len(seeds) == 1 else f'original-{index}.png'
+            name = 'result.png' if len(seeds) == 1 else f'result-{index}.png'
+            image = client.upload(directory / original)
+            if (directory / 'cancel').exists():
+                return
+            graph = _chord_workflow(dict(chord=caps['chord'], tile=1024, overlap=128), image)
+            normal_name = name.replace('result', 'normal', 1)
+            expected.extend((name, normal_name))
+            publish(directory, 'progress.json', dict(stage='Estimating albedo + normal', done=index, total=len(seeds)))
+            prompt_id = client.post('/prompt', json.dumps({'prompt': graph}).encode())['prompt_id']
+            prompt_ids.append(prompt_id)
+            publish(directory, 'queued.json', dict(prompt_id=prompt_id))
+            deadline = time.monotonic() + 1200
+            while time.monotonic() < deadline and not (directory / 'cancel').exists():
+                history = json.loads(client.get('/history/' + parse.quote(prompt_id))).get(prompt_id)
+                if history:
+                    status = history.get('status', {})
+                    if status.get('status_str') == 'error':
+                        raise RuntimeError('Chord albedo estimation: ' + str(status.get('messages', status)))
+                    images = history.get('outputs', {}).get('10', {}).get('images', [])
+                    normal_images = history.get('outputs', {}).get('11', {}).get('images', [])
+                    if images and normal_images:
+                        (directory / name).write_bytes(client.get('/view?' + parse.urlencode(images[0])))
+                        (directory / normal_name).write_bytes(client.get('/view?' + parse.urlencode(normal_images[0])))
+                        publish(directory, 'progress.json', dict(stage='Estimating albedo + normal', done=index + 1,
+                                                                 total=len(seeds)))
+                        break
+                    if status.get('completed'):
+                        raise RuntimeError('Chord completed without paired albedo and normal images')
+                time.sleep(0.5)
+            else:
+                if not (directory / 'cancel').exists():
+                    raise TimeoutError(f'Chord prompt {prompt_id} exceeded 20 minutes; output will be discarded')
         publish(directory, 'done.json', dict(seeds=seeds))
     except Exception as exc:
         publish(directory, 'done.json', dict(error=str(exc)))

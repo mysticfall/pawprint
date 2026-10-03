@@ -1,5 +1,59 @@
 # Scope and validation
 
+## Current slice: tangent-space normal workflow
+
+The user superseded the object-space UV normal bake: exported normals should
+describe surface detail for external applications, not broad mesh geometry.
+Chord inference/strength remain unchanged; estimation errors are deferred.
+
+- Commit to Base uses a native Cycles NORMAL bake in the saved UV tangent basis,
+  +X/+Y/+Z (OpenGL) encoding, rather than emission of object-space normals.
+- The UV base uses a tangent-space Normal Map node. Projected detail is oriented
+  around the lower composed normal, so neutral estimates preserve existing detail.
+- Normal RGB extends at frame edges to prevent CLIP interpolation toward black
+  from inventing a tilt; existing saved-frame coverage and alpha still gate it.
+- Layer Details exposes the tangent base image. Prior object-space bakes are not
+  silently converted: clear/replace them or rebake from retained source layers
+  without the old normal base. No prototype migration is added.
+- Factory Cycles and Eevee normal checks verify axes, mirror, alpha, composition,
+  mirrored UV handedness, paired undo and
+  persistence; a rotated, nonuniformly scaled smooth sphere bakes neutral normals
+  without curvature, and a neutral projection preserves an existing tangent base.
+  Baking regression, isolated native review/Apply/Layer undo, and interactive
+  registration/reload smoke passed. External-engine visual acceptance remains.
+
+## Previous slice: boundary matching after Chord albedo estimation
+
+The user approved matching estimated albedo to the existing unlit stack, rather
+than the lit generation context. Each selected submission captures a temporary
+emission reference of the target slot with trusted texture coverage; other slots
+and geometry are occluding holdouts, and untouched initial-gray base is excluded.
+After Chord, corresponding unchanged boundary pixels determine robust weighted
+LAB mean/contrast correction. Editable RGB alone changes; ordinary feathering,
+paired normals, Original review, selected Layer output and native undo remain.
+Full-frame or inadequately textured boundary cases skip matching. This does not
+claim automatic geometric/normal seamlessness or physically correct de-lighting.
+No persistent reference property or extra Chord inference is added.
+
+Verified on Blender 5.2.2:
+
+- System Python: five boundary matching checks for shifted/flat colors, new
+  interior features, truly excluded background, skip conditions and exact
+  outside/alpha preservation.
+- Factory headless Cycles and Eevee: unlit color independent of World lighting,
+  target-slot-only coverage, no-material occluders, excluded gray base/valid gray
+  paint, unchanged source buffers and restoration after injected capture failure.
+- Isolated factory UI: paired batch review uses matched albedo but unchanged
+  originals/normals; existing masked preview/Apply/Layer and native undo/redo
+  checks pass. Capture-only passes Eevee, Workbench fallback and Cycles with
+  unchanged lit server input. Headless and isolated-UI registration/reload smoke,
+  19 backend tests and Cycles/Eevee projection/save-reopen regressions pass.
+- Live isolated SDXL inpainting with Chord passed native result undo/redo,
+  settings restoration, owned cancellation and stale-target rejection. These
+  are workflow checks, not real-scene artistic seam acceptance.
+
+The user's actual texture/color continuity still needs hands-on review.
+
 ## Target-focused geometry-depth guidance
 
 Geometry guidance now measures its depth range from visible hits on the active
@@ -20,7 +74,206 @@ save/reopen regressions. The user confirmed the brighter live depth preview;
 the exact saved-view export was also inspected through Blender MCP. Live ComfyUI
 generation remains unverified for this slice.
 
-## Current slice: SDXL reference inpaint pipelines (version unchanged at 0.2.0)
+## Current slice: surface-relative normals in the main workflow
+
+The user chose surface-relative normals at full strength **1.0** and explicitly
+requested integration into the main workflow. Every Chord pass now returns both
+albedo and normals from the same inference. Review switches paired candidates;
+Apply/Layer retain both even when Original is displayed. Normals are packed float
+Non-Color images with Channel Packed coverage (Eevee otherwise unpremultiplies
+the vector RGB at fractional alpha). Saved-camera tangent basis, normalized
+composition, visibility, albedo erasure and reflected mirror vectors are wired
+into the working Principled Normal input. Normal painting remains unexposed.
+
+Apply replaces the normal snapshot before the native albedo clone stroke;
+isolated UI tests verify one undo/redo for creation and replacement, including
+unselected texel preservation. Layer keeps both maps with selection-limited alpha.
+Commit to Base also bakes object-space normals to a UV image with paired
+structural undo, preserving the channel when source layers are removed. This
+is not a tangent-space normal export feature.
+
+Headless production shader tests cover right/down/flat axes, fractional coverage,
+visibility, mirror reflection, saved-basis rotation, ordered composition,
+selection-limited merging, UV bake/undo and packed persistence. Real-scene
+acceptance remains the purpose of the full-strength trial; broad inferred form
+may exaggerate existing mesh curvature.
+
+Validation passed on Blender 5.2.2: headless normal checks in Cycles and Eevee,
+19 backend tests, projection rendering/persistence regressions, and headless
+registration smoke. Isolated factory UI checks passed paired Apply/Layer native
+undo/redo, review cleanup and editor switching, commit baking, existing PBR
+helpers, and interactive reload smoke. Live SDXL single and batch workflows
+passed with paired Chord outputs. No user's live scene was modified.
+
+### Selection boundaries and context subdivision follow-up
+
+Review previously showed full rectangular candidates and Layer retained context
+padding, although Apply already used the native selection stencil. Review now
+composites over the source inside the selected/feathered footprint, and Layer
+limits both maps' alpha. Isolated UI regression checks use an L-shaped footprint
+and partial feathering, verify untouched albedo/normal preview pixels and new-layer
+coverage, and retain native paired undo/redo checks.
+
+Context capture previously copied modifier enable states but left render-specific
+subdivision levels. It now temporarily matches SUBSURF/MULTIRES viewport levels
+and restores them, including failure cleanup. Isolated capture checks pass in
+Eevee, Workbench fallback and Cycles, including preview/input equality. This fixes
+a genuine geometry mismatch with viewport-derived visibility snapshots; its
+role in the reported white artifacts still requires the user's current scene.
+Blender MCP was unavailable during this follow-up; no live scene was modified.
+
+### Stale review texture binding follow-up
+
+Live read-only inspection confirmed a layer texture still sampling a candidate
+preview while no review was active. Image-based lookup then rejected the next
+completed generation. Albedo texture nodes now identify their layer separately
+from the sampled image. Generation repairs missing/stale managed bindings before
+context capture and before starting review, also rebuilding older graphs without
+normal bindings. Source image pixels are not modified by repair.
+
+Isolated review regression checks reproduce an untagged orphan-preview binding
+and a removed texture node, verify automatic recovery and unchanged source pixels,
+and retain paired native Apply/Layer undo and cleanup checks. Capture checks in
+Eevee, Workbench fallback and Cycles and headless reload smoke also passed. The
+live scene was inspected but not rebuilt or reloaded during this fix.
+
+## Previous experiment: projected Chord normals
+
+The user approved a single-view trial before layer composition or normal baking.
+`tools/normal_probe.py` estimates albedo and normals together from a saved original
+candidate and creates an isolated scene copy with adjustable normal strength and
+camera-space/surface-relative interpretation. Production generation remains
+albedo-only. The experiment requires one non-mirrored layer and reuses its saved
+projection, visibility, selection and alpha coverage. It is not an editable or
+undo-integrated normal channel.
+
+Chord's installed renderer (`src/util.py:get_positions` and
+`src/module/chord.py:compute_render`) establishes exported normals as image-right,
+image-down, toward-viewer: green must be inverted for the Blender image-up basis.
+This corrects the earlier unverified OpenGL assumption in the historical PBR
+slice. Chord is trained for top-down material estimation, not calibrated
+perspective scene normals; neither absolute nor surface-detail interpretation is
+assumed correct for arbitrary generated scenes.
+
+The probe uses Non-Color sampling, vector decoding/normalization, a fixed saved
+camera basis for absolute normals, and camera-right projected onto the mesh
+normal plane for surface-relative detail. Coverage mixes the result with the
+mesh shading normal, then normalizes. Headless Cycles calibration verifies flat,
+right/down signs, disabled/hidden behavior, fractional alpha and saved-basis
+rotation. An isolated copy of the user's diagnostic scene was relit from left,
+right, above and below in Eevee. Absolute normals visibly flatten its lighting;
+surface-relative detail exaggerates some shading, consistent with broad form
+already present in Chord's estimates. Choosing a useful interpretation/strength
+and whether to separate low-frequency form from detail remains a visual
+acceptance decision. No live scene or production material was changed.
+
+## Previous slice: Chord albedo before generation review (version unchanged)
+
+The user replaced the reference-division experiment after a real-scene diagnosis:
+the World changed after reference capture, producing stale spatial illumination
+and excessive clipping. Fresh capture fixed most clipping, but the user chose
+learned albedo estimation instead and has already visually tested Chord manually.
+No additional direct final-image comparison trial is required for this slice.
+
+- Lit context → SDXL/ZIT generation → tiled Chord albedo → Original/Albedo review
+  → native Apply/Layer. No shading capture/recapture or old-reference checks.
+- All batch generation runs before sequential Chord passes, reducing model
+  swaps. Albedo uses the original crop dimensions; alpha and selection placement
+  are preserved. No normals/roughness/metalness are applied. Chord internally
+  still estimates all outputs and infers at 1024², even for smaller crops.
+- Chord is required before submission; either-phase failures/cancellation never
+  commit results. Owned queue deletion and stale-target guards cover both phases.
+  Normal ModelPatcher offloading handles VRAM; no global unload or interrupt.
+- Final Estimate Albedo & Normal command removed. Existing derived-material
+  helpers remain; diffuse working material and unlit commit bakes are retained.
+- Headless fake-server checks cover two-phase ordering, paired output files,
+  missing Chord, failed/missing albedo and cancellation during the Chord POST.
+  Isolated factory UI review checks cover editor/version switching, alpha,
+  albedo-only commits, native Apply/Layer undo/redo and cleanup guards.
+- Real-scene quality and workflow feel remain user acceptance items. Chord adds
+  inference latency and memory demand and can change colors/details; it does
+  not correct generated geometry. The earlier intermittent ZIT undo assertion
+  below remains part of the validation history.
+
+### Chord workflow validation and memory observations
+
+On Blender 5.2.2 with the local ComfyUI installation:
+
+- Headless: 19 fake-server backend tests and registration/reload smoke passed.
+  Isolated factory UI: review-only, interactive smoke, commit baking and existing
+  derived-material helper regressions passed.
+- Live SDXL single and batches (three, two, two candidates) passed generation,
+  Chord, review, native application/undo and cancellation/stale-target checks.
+  Live ZIT completed both inference stages but once reproduced the previously
+  observed unrelated-image preservation assertion after undo/redo; an unchanged
+  rerun passed. This intermittent native undo issue remains unresolved.
+- Initial 256px-request measurements on the RTX 4070 Ti SUPER (16376 MiB): SDXL
+  batch generation peaked at 9830 MiB and its Chord phase at 9569 MiB; ZIT peaked
+  at 15766 MiB during generation and 15405 MiB during Chord. These are sampled
+  **total GPU usage**, including Blender, desktop and cached allocations, not
+  incremental Chord requirements. ZIT leaves little headroom on this 16 GB GPU.
+- ComfyUI execution timings for those small requests: the initial Chord pass
+  took about 42 s; batch first passes took 12.6–13.0 s and subsequent candidates
+  about 2.2 s; the observed ZIT-to-Chord transition took about 34 s. Loading and
+  offloading contribute to these times; they are not general performance promises.
+- Follow-up 1024px-request single-generation checks passed for both SDXL and ZIT,
+  including native undo/redo. SDXL peaked at 9889 MiB during generation and
+  9485 MiB during Chord; ZIT peaked at 15790 MiB and 14273 MiB respectively.
+  Neither run encountered an out-of-memory failure. Total probe runtimes were
+  53 s and 120 s, including setup and application/guard checks. These results
+  support sequential model offloading, but do not establish headroom for larger
+  user scenes or additional conditioning models.
+
+## Previous slice: float references and unified generation review (superseded)
+
+The reference-compensation module and its dedicated test were removed when
+Chord replaced this approach; the following records the previous validation.
+
+- Creation-time packed scene-linear float gray diffuse shading references (32-bit
+  EXR capture, straight RGB independent of silhouette coverage), shared saved-frame
+  render helper, manual per-layer recapture, and no automatic refresh or migration.
+  Old byte references explicitly require recapture before generation; the ComfyUI
+  input capture remains neutral Standard/sRGB PNG8.
+- RGB inverse diffuse compensation before native result application and review
+  previews. Alpha-zero reference background and missing references pass through.
+  Candidates kept as layers share their source's same-view reference.
+- Working composite switches from emission to diffuse-only Principled; commit
+  and Chord composite bakes retain emission copies. Derived PBR flow is unchanged.
+- Model adherence to scene lighting is an experimental assumption, not a promise
+  of automatic seamlessness. Sphere cues are manual. Generated LDR clipping, specular
+  effects, invented lighting and deep-shadow amplification remain limitations.
+- Single and batch results enter review on Compensated. Shared Original/Compensated
+  and same-area Viewport/Image Editor controls preserve comparison state. Original
+  pixels are review-only. Apply and Layer always commit compensated pixels;
+  Image Editor Apply temporarily uses 3D context for native clone undo and returns
+  to the committed image. Discard releases both versions; all review exit paths
+  release originals. Image Editor painting/image replacement and preview edits
+  close review, alongside the existing target and save/load/undo guards.
+- Headless `tools/shading_test.py` checks synthetic ratios, clamps, alpha, crop isolation,
+  actual diffuse/reference cancellation, temporary-state cleanup (including an
+  injected failure), immutable recapture and packed-reference persistence in
+  isolated Cycles and Eevee processes, including coloured World/light cancellation,
+  deliberate mismatch, HDR above the former reference ceiling, real fractional
+  silhouette coverage and old-byte rejection. Projection pixel checks use emission
+  copies to measure albedo independently of lighting, not to validate lit display.
+- Isolated factory UI `tools/generation_test.py --review-only` checks single/batch
+   completion, debug/editor switching, zoom/pan preservation across redraws on version toggles, compensated
+   Apply and Layer while Original is shown, native Image Editor Apply/Layer undo/redo,
+  cleanup and target/image/save guards without a server. Headless registration,
+  projection (Cycles/Eevee/reopen), commit bake and PBR regressions and isolated UI
+  capture-only/smoke checks passed on Blender 5.2.2 LTS/Linux. Live SDXL plain
+   single/batch, depth, IPAdapter and selected inpaint generation, plus ZIT single
+   generation, passed through review, compensated application and native undo.
+- Sky tint is expected: transparent film hides the background, not World lighting.
+  Float references fix reference clipping, not generated highlight clipping or
+  a model's lighting mismatch. They increase storage. The user's unsaved grey
+  patches remain undiagnosed. The prior ZIT unrelated-image preservation assertion
+  failed once after undo/redo and passed three reruns without a production fix;
+  retain this intermittent issue rather than attributing it to the lost patches.
+- Interactive visual quality and painting-color matching under scene lighting
+  still require user acceptance on representative scenes.
+
+## Previous slice: SDXL reference inpaint pipelines (version unchanged at 0.2.0)
 
 The user supplied two reference ComfyUI workflows, `workflow-inpaint-replace.json`
 (denoise 1.0) and `workflow-refine.json` (denoise below 1.0), and asked for the
@@ -878,7 +1131,7 @@ or future checks. Blender 5.0 has not been separately tested.
 
 ## Intended initial product
 
-- Perspective projection layers and an unlit committed UV base per object/slot.
+- Perspective albedo projection layers and a diffuse-lit committed UV base per object/slot.
 - Native image data, visibility, saved viewpoints, image frames, and scene-aware
   projection coverage.
 - Locked-view painting/erasing, arbitrary/disconnected selections, cropped or
@@ -917,7 +1170,7 @@ implementation slices, settle:
    isolation, frame alignment, transparent overlaps, and stability on save/reload.
 3. **Editing:** locked-view brush-to-image mapping and synchronizing native 2D edits.
 4. **Context fidelity:** higher visible layers and surrounding objects included;
-   overlays excluded; unlit stack appearance preserved through color management.
+   overlays excluded; lit stack appearance captured with neutral color management.
 5. **Crop fidelity:** disconnected selections, padding, feathering, resized controls,
    and returned patch placement leave unselected pixels unchanged.
 6. **Backend:** discover actual nodes/models and verify each adapter's promised

@@ -40,9 +40,107 @@ def worker():
                 layer = ext.model.active_layer(ext.model.active_stack(bpy.context))
                 def pixels():
                     return np.array(bpy.data.images[name].pixels[:])
+                def fixture_review(count=1, alpha=1, matching=False):
+                    # Exercise completion via tick, with deterministic PNGs and
+                    # an already-exited worker: no server or GPU job required.
+                    stack = ext.model.active_stack(bpy.context)
+                    width, height = layer.image.size
+                    directory = Path(tempfile.mkdtemp(prefix='pawprint-review-test-'))
+                    seeds = [str(100 + index) for index in range(count)]
+                    settings = {'seed': seeds[0]}
+                    if count > 1:
+                        settings['seeds'] = seeds
+                    metadata = dict(bounds=(0, 0, width, height), request_size=(width, height),
+                                    weights=np.ones((height, width), dtype=np.float32))
+                    if matching:
+                        metadata['weights'][:] = 0
+                        metadata['weights'][40:88, 40:88] = 1
+                        reference = np.ones((height, width, 4), dtype=np.float32)
+                        reference[:, :, :3] = (.25, .45, .65)
+                        metadata['albedo_reference'] = reference
+                    for index in range(count):
+                        rgba = np.ones((height, width, 4), dtype=np.float32)
+                        rgba[:, :, :3] = (.3 + index * .1, .5, .7)
+                        ext.capture.save_input(directory / (f'result-{index}.png' if count > 1 else 'result.png'),
+                                               rgba, (width, height))
+                        normal = np.ones_like(rgba)
+                        normal[:, :, :3] = (.5 + index * .1, .8, .9)
+                        ext.capture.save_input(directory / (f'normal-{index}.png' if count > 1 else 'normal.png'),
+                                               normal, (width, height), non_color=True)
+                        rgba[:, :, :3] *= .5
+                        rgba[:, :, 3] = alpha
+                        original = bpy.data.images.new('Fixture generated RGBA', width=width, height=height, alpha=True)
+                        original.pixels.foreach_set(rgba.ravel())
+                        original.filepath_raw = str(directory / (f'original-{index}.png' if count > 1 else 'original.png'))
+                        original.file_format = 'PNG'
+                        original.save()
+                        bpy.data.images.remove(original)
+                    process = subprocess.Popen([sys.executable, '--version'], stdout=subprocess.DEVNULL)
+                    process.wait()
+                    ext.backend.publish(directory, 'done.json', {})
+                    ext.generation._job = dict(operation='generate', directory=directory, process=process,
+                        window=bpy.context.window, area=area, scene=bpy.context.scene.as_pointer(),
+                        view_layer=bpy.context.view_layer.name, owner=bpy.context.object.as_pointer(),
+                        material=stack.id_data.as_pointer(), slot=bpy.context.object.active_material_index,
+                        fingerprint=ext.generation.fingerprint(layer), digest=ext.generation.digest(layer.image),
+                        settings=settings, metadata=metadata)
+                    ext.generation.tick()
+                    assert not directory.exists() and ext.generation.review_active(), ext.generation.status()
+                    return ext.generation._review
                 if state['phase'] == 'connect':
+                    if '--review-only' in sys.argv:
+                        before_repair = ext.capture.pixels(layer.image).copy()
+                        orphan = bpy.data.images.new('Pawprint Orphan Preview Test', width=128, height=128)
+                        node = ext.generation._display_node(layer)
+                        node.image = orphan
+                        # Simulate an older graph, whose node cannot be located
+                        # by image after a preview was left bound without review.
+                        if 'pawprint_albedo_layer' in node:
+                            del node['pawprint_albedo_layer']
+                        alpha_review = fixture_review(alpha=.4)
+                        assert np.array_equal(alpha_review['originals'][0][:, :, 3],
+                                              alpha_review['candidates'][0][:, :, 3])
+                        assert np.all(alpha_review['candidates'][0][:, :, 3] == 102)
+                        ext.generation.end_review('Alpha preservation verified')
+                        assert ext.generation._display_node(layer).image == layer.image
+                        assert np.array_equal(ext.capture.pixels(layer.image), before_repair)
+                        bpy.data.images.remove(orphan)
+                        node = ext.generation._display_node(layer)
+                        layer.id_data.node_tree.nodes.remove(node)
+                        repaired = ext.generation._ensure_layer_display(layer)
+                        assert repaired.image == layer.image and repaired.get('pawprint_albedo_layer') == layer.path_from_id()
+                        assert np.array_equal(ext.capture.pixels(layer.image), before_repair)
+                        matched_review = fixture_review(count=2, matching=True)
+                        for index in range(2):
+                            np.testing.assert_allclose(matched_review['candidates'][index][64, 64, :3] / 255,
+                                                       (.25, .45, .65), atol=2 / 255)
+                            np.testing.assert_allclose(matched_review['normals'][index][64, 64, :3],
+                                                       (.5 + index * .1, .8, .9), atol=1 / 255)
+                            np.testing.assert_allclose(matched_review['originals'][index][64, 64, :3] / 255,
+                                                       ((.3 + index * .1) * .5, .25, .35), atol=1 / 255)
+                        assert np.array_equal(ext.capture.pixels(layer.image), before_repair)
+                        ext.generation.end_review('Boundary matching verified')
+                        layer.selection_paths = '[]'
+                        state['before'] = pixels()
+                        bpy.ops.ed.undo_push(message='Before single review')
+                        review = fixture_review()
+                        assert np.array_equal(pixels(), state['before']), 'Single result applied before review'
+                        assert review['version'] == 'ALBEDO' and len(review['originals']) == 1
+                        state['expected'] = review['candidates'][0].copy()
+                        assert not np.array_equal(review['originals'][0], state['expected'])
+                        assert bpy.ops.pawprint.candidate_version(version='ORIGINAL') == {'FINISHED'}
+                        assert bpy.ops.pawprint.candidate_editor(editor='IMAGE_EDITOR') == {'FINISHED'}
+                        state['phase'] = 'review_image'
+                        return .5
                     if '--capture-only' in sys.argv:
                         scene = bpy.context.scene
+                        subdivision = bpy.context.object.modifiers.new('Capture viewport subdivision', 'SUBSURF')
+                        subdivision.levels, subdivision.render_levels = 0, 2
+                        subdivision.show_render = False
+                        render_states = []
+                        def check_subdivision(render_scene):
+                            render_states.append((subdivision.show_render, subdivision.render_levels))
+                        bpy.app.handlers.render_pre.append(check_subdivision)
                         layer.generation_resolution = 256
                         ext.selection.add_path(layer, [(.15,.2),(.4,.2),(.4,.65),(.15,.65)], 'REPLACE')
                         layer.generation_padding = 4
@@ -54,6 +152,7 @@ def worker():
                             with tempfile.TemporaryDirectory(prefix='pawprint-capture-test-') as temp:
                                 directory = Path(temp)
                                 metadata = ext.capture.prepare(bpy.context, layer, directory, 256)
+                                assert metadata['albedo_reference'].shape == (*tuple(layer.image.size)[::-1], 4)
                                 assert all((directory / file).is_file() for file in
                                            ('composite.png', 'input.png', 'mask.png'))
                                 composite = bpy.data.images.load(str(directory / 'composite.png'))
@@ -73,16 +172,230 @@ def worker():
                                 area.type = 'VIEW_3D'
                                 bpy.data.images.remove(preview)
                             assert scene.render.engine == engine, 'Original engine changed'
+                            assert render_states[-1] == (True, 0), 'Capture used render-only subdivision'
+                            assert subdivision.render_levels == 2 and not subdivision.show_render, 'Subdivision settings leaked'
                             assert (scene.render.filepath, scene.render.resolution_x,
                                     scene.render.resolution_y, scene.camera) == original
                             assert set(bpy.data.scenes.keys()) == scenes, 'Capture scene leaked'
                             print({'capture_engine': engine, 'passed': True}, flush=True)
+                        bpy.app.handlers.render_pre.remove(check_subdivision)
+                        matrix = ext.projection.matrix
+                        def fail_capture(_):
+                            raise RuntimeError('Injected capture setup failure')
+                        ext.projection.matrix = fail_capture
+                        try:
+                            with tempfile.TemporaryDirectory(prefix='pawprint-capture-failure-') as temp:
+                                try:
+                                    ext.capture.render_frame(bpy.context, layer, Path(temp) / 'failed.png')
+                                    raise AssertionError('Capture should have failed')
+                                except RuntimeError as exc:
+                                    assert 'Injected' in str(exc)
+                        finally:
+                            ext.projection.matrix = matrix
+                        assert subdivision.render_levels == 2 and not subdivision.show_render
+                        assert set(bpy.data.scenes.keys()) == scenes, 'Failed capture leaked scene'
                         bpy.ops.wm.quit_blender()
                         return None
                     assert bpy.ops.pawprint.connect() == {'FINISHED'}
                     state['phase'] = 'wait_connection'
+                elif state['phase'] == 'review_image':
+                    review = ext.generation._review
+                    assert review and area.type == 'IMAGE_EDITOR' and review['version'] == 'ORIGINAL'
+                    assert area.spaces.active.image == review['preview']
+                    assert not review['preview'].use_view_as_render
+                    bpy.ops.image.view_zoom_ratio(ratio=2)
+                    bpy.ops.image.view_pan(offset=(37, -19))
+                    state['phase'] = 'review_toggle'
+                elif state['phase'] == 'review_toggle':
+                    # Read mapping after redraw so it reflects both zoom and pan.
+                    zoom = tuple(area.spaces.active.zoom)
+                    state['review_zoom'] = zoom
+                    state['review_mapping'] = tuple(region.view2d.region_to_view(0, 0))
+                    assert bpy.ops.pawprint.candidate_version(version='ALBEDO') == {'FINISHED'}
+                    assert tuple(area.spaces.active.zoom) == zoom, 'Version toggle reset zoom'
+                    state['phase'] = 'review_toggle_original'
+                elif state['phase'] == 'review_toggle_original':
+                    assert tuple(area.spaces.active.zoom) == state['review_zoom'], 'Version toggle reset zoom after redraw'
+                    assert np.allclose(region.view2d.region_to_view(0, 0), state['review_mapping']), 'Version toggle reset pan'
+                    assert np.allclose(ext.capture.pixels(ext.generation._review['preview']), state['expected'] / 255)
+                    assert bpy.ops.pawprint.candidate_version(version='ORIGINAL') == {'FINISHED'}
+                    state['phase'] = 'review_return_view'
+                elif state['phase'] == 'review_return_view':
+                    assert tuple(area.spaces.active.zoom) == state['review_zoom'], 'Original toggle reset zoom'
+                    assert np.allclose(region.view2d.region_to_view(0, 0), state['review_mapping']), 'Original toggle reset pan'
+                    review = ext.generation._review
+                    assert np.allclose(ext.capture.pixels(review['preview']), review['originals'][0] / 255)
+                    assert bpy.ops.pawprint.candidate_editor(editor='VIEW_3D') == {'FINISHED'}
+                    assert ext.generation._review['version'] == 'ORIGINAL'
+                    assert bpy.ops.pawprint.candidate_editor(editor='IMAGE_EDITOR') == {'FINISHED'}
+                    state['phase'] = 'review_apply'
+                elif state['phase'] == 'review_apply':
+                    review = ext.generation._review
+                    assert bpy.ops.pawprint.commit_candidate('EXEC_DEFAULT', True) == {'FINISHED'}
+                    assert not ext.generation.review_active() and not review['originals']
+                    assert area.type == 'IMAGE_EDITOR' and area.spaces.active.image == bpy.data.images[name]
+                    after = pixels()
+                    assert not np.array_equal(after, state['before'])
+                    assert np.max(np.abs(after.reshape(state['expected'].shape) - state['expected'] / 255)) <= 2/255
+                    state['after'] = after
+                    assert layer.normal and layer.normal.packed_file
+                    state['normal_after'] = ext.capture.pixels(layer.normal).copy()
+                    assert not ext.painting.active()
+                    assert not any(o.get('_pawprint_paint_proxy') for o in bpy.data.objects)
+                    state['phase'] = 'review_undo'
+                elif state['phase'] == 'review_undo':
+                    bpy.ops.ed.undo()
+                    assert np.array_equal(pixels(), state['before']), 'Image Editor Apply undo'
+                    assert ext.model.active_layer(ext.model.active_stack(bpy.context)).normal is None, 'Normal Apply undo'
+                    bpy.ops.ed.redo()
+                    assert np.array_equal(pixels(), state['after']), 'Image Editor Apply redo'
+                    assert np.array_equal(ext.capture.pixels(ext.model.active_layer(ext.model.active_stack(bpy.context)).normal),
+                                          state['normal_after']), 'Normal Apply redo'
+                    state['phase'] = 'review_batch'
+                elif state['phase'] == 'review_batch':
+                    area.type = 'VIEW_3D'
+                    stack = ext.model.active_stack(bpy.context)
+                    state['source_name'] = layer.image.name
+                    state['layer_source_pixels'] = pixels()
+                    state['layer_count'] = len(stack.layers)
+                    bpy.ops.ed.undo_push(message='Before Image Editor candidate layer')
+                    review = fixture_review(2)
+                    weights = review['weights']
+                    weights[:] = 0
+                    weights[32:96, 32:96] = 1
+                    weights[64:96, 64:96] = 0  # L selection inside a larger context rectangle.
+                    weights[31, 32:96] = .5
+                    state['masked_weights'] = weights.copy()
+                    ext.generation._show_candidate(review)
+                    outside = weights == 0
+                    assert np.allclose(ext.capture.pixels(review['preview'])[outside],
+                                       ext.capture.pixels(layer.image)[outside], atol=1/255), 'Review changed padded context'
+                    assert np.array_equal(ext.capture.pixels(review['normal_preview'])[outside],
+                                          ext.capture.pixels(layer.normal)[outside]), 'Normal review changed padded context'
+                    assert bpy.ops.pawprint.candidate_version(version='ORIGINAL') == {'FINISHED'}
+                    assert bpy.ops.pawprint.candidate_select(direction=1) == {'FINISHED'}
+                    assert review['version'] == 'ORIGINAL'
+                    expected = review['candidates'][1].copy()
+                    expected[:, :, 3] = np.round(expected[:, :, 3] * weights).astype(np.uint8)
+                    assert bpy.ops.pawprint.candidate_editor(editor='IMAGE_EDITOR') == {'FINISHED'}
+                    # Python operator calls default to no automatic global-undo
+                    # push; request it as a real UI button invocation would.
+                    assert bpy.ops.pawprint.candidate_layer('EXEC_DEFAULT', True) == {'FINISHED'}
+                    layer = ext.model.active_layer(ext.model.active_stack(bpy.context))
+                    assert np.allclose(ext.capture.pixels(layer.image), expected / 255)
+                    assert np.all(ext.capture.pixels(layer.normal)[:, :, 3][outside] == 0), 'Normal Layer kept context padding'
+                    assert area.spaces.active.image == layer.image
+                    assert np.array_equal(pixels(), state['layer_source_pixels'])
+                    assert not review['originals'] and not review['candidates']
+                    state['layer_expected'] = expected
+                    state['phase'] = 'review_layer_undo'
+                elif state['phase'] == 'review_layer_undo':
+                    bpy.ops.ed.undo()
+                    stack = ext.model.active_stack(bpy.context)
+                    assert len(stack.layers) == state['layer_count'], 'Image Editor Layer undo'
+                    assert ext.model.active_layer(stack).image.name == state['source_name']
+                    assert np.array_equal(pixels(), state['layer_source_pixels'])
+                    state['phase'] = 'review_layer_redo'
+                elif state['phase'] == 'review_layer_redo':
+                    assert bpy.ops.ed.redo() == {'FINISHED'}
+                    stack = ext.model.active_stack(bpy.context)
+                    assert len(stack.layers) == state['layer_count'] + 1, 'Image Editor Layer redo'
+                    layer = ext.model.active_layer(stack)
+                    assert np.allclose(ext.capture.pixels(layer.image), state['layer_expected'] / 255)
+                    assert np.array_equal(pixels(), state['layer_source_pixels'])
+                    assert layer.normal and layer.normal.colorspace_settings.name == 'Non-Color'
+                    state['phase'] = 'review_pair_apply'
+                elif state['phase'] == 'review_pair_apply':
+                    area.type = 'VIEW_3D'
+                    state['pair_before'] = ext.capture.pixels(layer.image).copy()
+                    state['pair_normal_before'] = ext.capture.pixels(layer.normal).copy()
+                    bpy.ops.ed.undo_push(message='Before replacing existing normal')
+                    review = fixture_review()
+                    review['weights'][:, :64] = 0
+                    assert bpy.ops.pawprint.commit_candidate('EXEC_DEFAULT', True) == {'FINISHED'}
+                    state['pair_after'] = ext.capture.pixels(layer.image).copy()
+                    state['pair_normal_after'] = ext.capture.pixels(layer.normal).copy()
+                    assert np.array_equal(state['pair_after'][:, :64], state['pair_before'][:, :64]), 'Apply changed unselected albedo'
+                    assert np.array_equal(state['pair_normal_after'][:, :64], state['pair_normal_before'][:, :64])
+                    assert not np.array_equal(state['pair_normal_after'], state['pair_normal_before'])
+                    state['phase'] = 'review_pair_undo'
+                elif state['phase'] == 'review_pair_undo':
+                    bpy.ops.ed.undo()
+                    layer = ext.model.active_layer(ext.model.active_stack(bpy.context))
+                    assert np.array_equal(ext.capture.pixels(layer.image), state['pair_before'])
+                    assert np.array_equal(ext.capture.pixels(layer.normal), state['pair_normal_before'])
+                    bpy.ops.ed.redo()
+                    layer = ext.model.active_layer(ext.model.active_stack(bpy.context))
+                    assert np.array_equal(ext.capture.pixels(layer.image), state['pair_after'])
+                    assert np.array_equal(ext.capture.pixels(layer.normal), state['pair_normal_after'])
+                    state['phase'] = 'review_guards'
+                elif state['phase'] == 'review_guards':
+                    area.type = 'VIEW_3D'
+                    review = fixture_review(2)
+                    assert bpy.ops.pawprint.discard_candidates() == {'FINISHED'}
+                    assert len(review['originals']) == len(review['candidates']) == 1
+                    assert bpy.ops.pawprint.discard_candidates() == {'FINISHED'}
+                    assert not review['originals'] and not review['candidates']
+                    review = fixture_review()
+                    layer.image.pixels[0] = 1 - layer.image.pixels[0]
+                    ext.generation._maintain_review()
+                    assert not ext.generation.review_active() and not review['originals']
+                    review = fixture_review()
+                    assert bpy.ops.pawprint.candidate_editor(editor='IMAGE_EDITOR') == {'FINISHED'}
+                    area.spaces.active.mode = 'PAINT'
+                    ext.generation._maintain_review()
+                    assert not ext.generation.review_active() and not review['originals']
+                    area.type = 'VIEW_3D'
+                    review = fixture_review()
+                    ext.generation.before_data_change()
+                    assert not ext.generation.review_active() and not review['originals']
+                    review = fixture_review()
+                    review['preview'].pixels[0] = 1 - review['preview'].pixels[0]
+                    ext.generation._maintain_review()
+                    assert not ext.generation.review_active() and not review['originals']
+                    review = fixture_review()
+                    assert bpy.ops.pawprint.candidate_editor(editor='IMAGE_EDITOR') == {'FINISHED'}
+                    apply = ext.result.apply
+                    def fail_apply(*args):
+                        raise ValueError('Injected candidate apply failure')
+                    ext.result.apply = fail_apply
+                    try:
+                        try:
+                            assert bpy.ops.pawprint.commit_candidate() == {'CANCELLED'}
+                        except RuntimeError as exc:
+                            assert 'Injected candidate apply failure' in str(exc)
+                    finally:
+                        ext.result.apply = apply
+                    assert area.type == 'IMAGE_EDITOR' and area.spaces.active.image == layer.image
+                    assert not ext.generation.review_active() and not review['originals']
+                    assert not ext.painting.active()
+                    area.type = 'VIEW_3D'
+                    review = fixture_review()
+                    ext.model.active_stack(bpy.context).active_index = 0
+                    ext.generation._maintain_review()
+                    assert not ext.generation.review_active() and not review['originals']
+                    assert not any(i.name.startswith('Pawprint Candidate Preview') for i in bpy.data.images)
+                    assert not any(i.name.startswith('Pawprint Normal Preview') for i in bpy.data.images)
+                    print({'single_batch_review': True, 'shared_version_editor_switch': True,
+                             'albedo_only_apply_layer': True, 'image_editor_apply_native_undo': True,
+                            'image_editor_layer_native_undo_redo': True,
+                           'review_cleanup_guards': True}, flush=True)
+                    bpy.ops.wm.quit_blender()
+                    return None
                 elif state['phase'] == 'wait_connection' and not ext.generation.active():
                     assert ext.generation.connected(bpy.context), ext.generation.status()
+                    # Missing Chord must fail before capture or any submission.
+                    chord = ext.generation._capabilities['chord']
+                    before = pixels()
+                    ext.generation._capabilities['chord'] = None
+                    try:
+                        try:
+                            assert bpy.ops.pawprint.generate() == {'CANCELLED'}
+                        except RuntimeError as exc:
+                            assert 'Chord' in str(exc)
+                        assert not ext.generation.active() and np.array_equal(pixels(), before)
+                    finally:
+                        ext.generation._capabilities['chord'] = chord
                     state['zit'] = '--zit' in sys.argv
                     state['batch'] = '--batch' in sys.argv
                     if '--ipadapter' in sys.argv:
@@ -100,7 +413,7 @@ def worker():
                     layer.generation_clip_skip = 2
                     layer.generation_seed = '18446744073709551615'
                     layer.generation_denoise = .4
-                    layer.generation_resolution = 256
+                    layer.generation_resolution = 1024 if '--high-resolution' in sys.argv else 256
                     layer.generation_depth_enabled = '--depth' in sys.argv
                     if state['zit']:
                         layer.generation_adapter = 'ZIT'
@@ -211,7 +524,8 @@ def worker():
                         assert (ext.generation._job['directory'] / 'reference.png').is_file(), 'Reference not exported'
                     composite = bpy.data.images.load(str(ext.generation._job['directory'] / 'composite.png'))
                     values = ext.capture.pixels(composite)
-                    assert np.max(np.abs(values[97,60,:3] - (0,1,1))) < .03, 'Upper layer absent'
+                    cyan = values[97,60,:3]
+                    assert cyan[0] < .03 and min(cyan[1:]) > .8 and abs(cyan[1]-cyan[2]) < .03, 'Upper layer absent'
                     assert np.max(np.abs(values[int(128*.45),int(192*.8),:3] - (0,0,1))) < .03, 'Viewport-only object absent'
                     assert np.any((values[:,:,0] > .95) & (values[:,:,1] < .03)), 'Other material slot absent'
                     bpy.data.images.remove(composite)
@@ -244,6 +558,7 @@ def worker():
                     # result: candidates are held in memory behind a preview
                     # datablock swapped into the layer's texture node.
                     assert ext.generation.status().startswith('Reviewing candidates'), ext.generation.status()
+                    assert len(ext.generation._review['candidates']) == 3
                     review = ext.generation._review
                     info = ext.generation.review_info()
                     assert review and info['count'] == 3 and info['index'] == 0
@@ -407,7 +722,10 @@ def worker():
                     else:
                         raise AssertionError('Job finished before its submitted workflow could be inspected')
                 elif state['phase'] == 'waiting' and not ext.generation.active():
-                    assert ext.generation.status().startswith('Applied generation'), ext.generation.status()
+                    assert ext.generation.status().startswith('Reviewing candidates'), ext.generation.status()
+                    assert ext.generation._review['version'] == 'ALBEDO'
+                    assert np.array_equal(pixels(), state['before']), 'Single generation bypassed review'
+                    assert bpy.ops.pawprint.commit_candidate() == {'FINISHED'}
                     if state.get('prompt_id'):
                         # Verify the submitted graph straight from server history:
                         # inpaint mode must carry the specialised encode and the
@@ -597,7 +915,8 @@ def worker():
                     assert np.array_equal(pixels(), after), 'Single-step generation redo'
                     state['after'] = after
                     for other, before in state['others'].items():
-                        assert np.array_equal(np.array(bpy.data.images[other].pixels[:]), before)
+                        actual = np.array(bpy.data.images[other].pixels[:])
+                        assert np.array_equal(actual, before), (other, float(np.max(np.abs(actual - before))))
                     # Cancellation and target switching are exercised through the real lifecycle.
                     assert bpy.ops.pawprint.connect() == {'FINISHED'}
                     assert bpy.ops.pawprint.cancel_generation() == {'FINISHED'}
@@ -670,5 +989,5 @@ if __name__ == '__main__':
                 env[f'BLENDER_USER_{suffix}'] = str(Path(temp) / suffix.lower())
             subprocess.run(['blender', '--factory-startup', '--python-exit-code', '1', '--python',
                             str(Path(__file__).resolve()), '--', '--worker',
-                            *[flag for flag in ('--capture-only', '--depth', '--ipadapter', '--inpaint', '--zit', '--batch') if flag in sys.argv]],
+                            *[flag for flag in ('--capture-only', '--review-only', '--depth', '--ipadapter', '--inpaint', '--zit', '--batch', '--high-resolution') if flag in sys.argv]],
                            env=env, check=True, timeout=600)

@@ -11,7 +11,7 @@ import tempfile
 import bpy
 import numpy as np
 
-from . import backend, capture, model, painting, result
+from . import backend, capture, colormatch, model, painting, result
 
 _job = None
 _retired = []
@@ -34,7 +34,8 @@ def review_info():
     if _review is None:
         return None
     seed = _review['seeds'][_review['index']]
-    return dict(index=_review['index'], count=len(_review['candidates']), seed=seed)
+    return dict(index=_review['index'], count=len(_review['candidates']), seed=seed,
+                version=_review['version'])
 
 
 def status():
@@ -88,7 +89,8 @@ class PAWPRINT_PG_prompt(bpy.types.PropertyGroup):
 def fingerprint(layer):
     return (layer.as_pointer(), layer.image.as_pointer(), tuple(layer.image.size),
             tuple(layer.projection), tuple(layer.view_matrix), layer.selection_paths,
-            layer.generation_feather, layer.generation_padding, layer.generation_context)
+            layer.generation_feather, layer.generation_padding, layer.generation_context,
+            (layer.normal.as_pointer(), digest(layer.normal)) if layer.normal else None)
 
 
 def digest(image):
@@ -96,44 +98,102 @@ def digest(image):
 
 
 def _display_node(layer):
-    """The layer's texture node inside its own material, matched by image."""
+    """Find the layer by identity even while a preview replaces its image."""
     tree = layer.id_data.node_tree
     if not tree:
         return None
     for node in tree.nodes:
-        if node.type == 'TEX_IMAGE' and node.name.startswith('Pawprint Layer') and node.image == layer.image:
+        if node.type == 'TEX_IMAGE' and node.get('pawprint_albedo_layer') == layer.path_from_id():
+            return node
+    for node in tree.nodes:
+        if (node.type == 'TEX_IMAGE' and node.name.startswith('Pawprint Layer')
+                and node.get('pawprint_albedo_layer') is None and node.image == layer.image):
             return node
     return None
+
+
+def _ensure_layer_display(layer):
+    """Restore stale/missing managed bindings before capture or a new review."""
+    from . import projection
+    node = _display_node(layer)
+    tree = layer.id_data.node_tree
+    has_normal = tree and any(n.type == 'TEX_IMAGE' and n.get('pawprint_layer') == layer.path_from_id()
+                              for n in tree.nodes)
+    if node is None or node.image != layer.image or not has_normal:
+        projection.build_material(layer.id_data)
+        node = _display_node(layer)
+    if node is None:
+        raise ValueError('Layer texture node could not be restored; check its image and saved depth')
+    return node
+
+
+def _review_pixels(review, candidate):
+    """Preview selected pixels over the existing layer, not the context rectangle."""
+    values = candidate.astype(np.float32) / 255
+    old = capture.pixels(review['layer_image'])
+    a = values[:, :, 3:4] * review['weights'][:, :, None]
+    old_weight = old[:, :, 3:4] * (1 - a)
+    alpha = a + old_weight
+    rgb = values[:, :, :3] * a + old[:, :, :3] * old_weight
+    np.divide(rgb, alpha, out=rgb, where=alpha > 0)
+    result = np.concatenate((rgb, alpha), axis=2)
+    result[review['weights'] == 0] = old[review['weights'] == 0]
+    return result
 
 
 def _show_candidate(review):
     """Display one candidate.
 
-    Every switch builds a fresh datablock: rewriting the pixels of an image the
-    viewport shader already bound does not reliably refresh its GPU texture,
-    so the datablock swap that displayed the first candidate is repeated per
-    candidate instead of mutating one shared preview.
+    Viewport switches build a fresh datablock to refresh the shader GPU texture.
+    Image Editor switches update its existing image: swapping the datablock there
+    resets native zoom/pan on the next redraw. Returning to 3D swaps afresh.
     """
     material, layer_image = review['material'], review['layer_image']
     previous = review.get('preview')
-    candidate = review['candidates'][review['index']]
-    values = candidate.astype(np.float32) / 255
-    preview = bpy.data.images.new('Pawprint Candidate Preview',
-                                  width=candidate.shape[1], height=candidate.shape[0], alpha=True)
+    candidate = review['originals' if review['version'] == 'ORIGINAL' else 'candidates'][review['index']]
+    values = _review_pixels(review, candidate)
+    preview = previous if review['area'].type == 'IMAGE_EDITOR' else None
+    if preview is None:
+        preview = bpy.data.images.new('Pawprint Candidate Preview',
+                                      width=candidate.shape[1], height=candidate.shape[0], alpha=True)
     preview.pixels.foreach_set(values.ravel())
     preview.update()
+    review['preview_digest'] = digest(preview)
     try:
         tree = material.node_tree
         targets = [node for node in tree.nodes if node.type == 'TEX_IMAGE'
-                   and (node.image == layer_image or (previous is not None and node.image == previous))]
+                   and (node.get('pawprint_albedo_layer') == review['layer_path']
+                        or (node.get('pawprint_albedo_layer') is None
+                            and node.name.startswith('Pawprint Layer')
+                            and (node.image == layer_image or (previous is not None and node.image == previous))))]
     except ReferenceError:
         targets = []
     for node in targets:
         node.image = preview
     review['preview'] = preview
-    if previous is not None and previous.name in bpy.data.images:
+    review['editor'] = review['area'].type
+    preview.use_view_as_render = False
+    if review['area'].type == 'IMAGE_EDITOR' and review['area'].spaces.active.image != preview:
+        review['area'].spaces.active.image = preview
+    if previous is not None and previous != preview and previous.name in bpy.data.images:
         bpy.data.images.remove(previous)
         preview.name = 'Pawprint Candidate Preview'
+    from . import normals
+    old_normal = review.get('normal_preview')
+    normal_preview = normals.image(normals.merged(review['layer_normal'],
+                                   review['normals'][review['index']], review['weights']),
+                                   'Pawprint Normal Preview')
+    review['normal_preview'] = normal_preview
+    review['normal_preview_digest'] = digest(normal_preview)
+    for node in material.node_tree.nodes:
+        if node.get('pawprint_layer') != review['layer_path']:
+            continue
+        if node.type == 'TEX_IMAGE':
+            node.image = normal_preview if review['version'] == 'ALBEDO' else review['layer_normal']
+        elif node.type == 'VALUE':
+            node.outputs[0].default_value = float(review['version'] == 'ALBEDO' or review['layer_normal'] is not None)
+    if old_normal is not None:
+        bpy.data.images.remove(old_normal)
 
 
 def end_review(message):
@@ -151,8 +211,32 @@ def end_review(message):
                     node.image = image
     except ReferenceError:
         pass
-    if preview is not None and preview.name in bpy.data.images:
-        bpy.data.images.remove(preview)
+    try:
+        for window in bpy.context.window_manager.windows:
+            for area in window.screen.areas:
+                if area.type == 'IMAGE_EDITOR' and area.spaces.active.image == preview:
+                    area.spaces.active.image = image
+    except ReferenceError:
+        pass
+    try:
+        if preview is not None and preview.name in bpy.data.images:
+            bpy.data.images.remove(preview)
+    except ReferenceError:
+        pass
+    review['originals'].clear()
+    review['candidates'].clear()
+    try:
+        for node in review['material'].node_tree.nodes:
+            if node.get('pawprint_layer') == review['layer_path']:
+                if node.type == 'TEX_IMAGE':
+                    node.image = review['layer_normal']
+                elif node.type == 'VALUE':
+                    node.outputs[0].default_value = float(review['layer_normal'] is not None)
+        if review.get('normal_preview') is not None:
+            bpy.data.images.remove(review['normal_preview'])
+    except ReferenceError:
+        pass
+    review['normals'].clear()
     _status = message
     redraw()
 
@@ -163,20 +247,34 @@ def _begin_review(context, job, seeds):
     stack = model.active_stack(context)
     layer = model.active_layer(stack)
     frame = layer.image.size
-    candidates = []
+    candidates, originals, normal_candidates = [], [], []
     for index in range(len(seeds)):
-        rgba = capture.returned_pixels(job['directory'] / f'result-{index}.png', frame, job['metadata'])
+        path = job['directory'] / (f'result-{index}.png' if job['settings'].get('seeds') else 'result.png')
+        original_path = path.with_name(path.name.replace('result', 'original', 1))
+        original = capture.returned_pixels(original_path, frame, job['metadata'])
+        originals.append(np.asarray(original * 255).round().clip(0, 255).astype(np.uint8))
+        rgba = capture.returned_pixels(path, frame, job['metadata'])
+        rgba[:, :, 3] = original[:, :, 3]
+        rgba = colormatch.match(rgba, job['metadata'])
         candidates.append(np.asarray(rgba * 255).round().clip(0, 255).astype(np.uint8))
-    node = _display_node(layer)
-    if node is None:
-        raise ValueError('Layer texture node not found; rebuild the material before reviewing')
+        normal = capture.returned_pixels(path.with_name(path.name.replace('result', 'normal', 1)),
+                                         frame, job['metadata'], non_color=True)
+        normal[:, :, 3] = original[:, :, 3]
+        normal_candidates.append(normal)
+    _ensure_layer_display(layer)
     _review = dict(window=job['window'], area=job['area'], scene=job['scene'], view_layer=job['view_layer'],
                    owner=job['owner'], material=stack.id_data, material_ptr=job['material'], slot=job['slot'],
                    index_in_stack=stack.active_index, layer_image=layer.image, image_ptr=layer.image.as_pointer(),
                    fingerprint=job['fingerprint'], digest=job['digest'], weights=job['metadata']['weights'],
-                   candidates=candidates, seeds=list(seeds), index=0)
+                    candidates=candidates, originals=originals, normals=normal_candidates,
+                    layer_normal=layer.normal, layer_path=layer.path_from_id(),
+                    version='ALBEDO', seeds=list(seeds), index=0)
     # _show_candidate creates the preview datablock and binds the layer node.
-    _show_candidate(_review)
+    try:
+        _show_candidate(_review)
+    except Exception:
+        end_review('Candidate review could not start')
+        raise
     _status = f"Reviewing candidates: 1/{len(seeds)} · seed {seeds[0]}"
 
 
@@ -186,12 +284,16 @@ def _maintain_review():
     try:
         window, area = review['window'], review['area']
         if (window not in bpy.context.window_manager.windows[:] or area not in window.screen.areas[:]
-                or area.type != 'VIEW_3D'):
+                or area.type not in {'VIEW_3D', 'IMAGE_EDITOR'}):
             end_review('Candidate review closed: viewport changed')
             return
         region = next(r for r in area.regions if r.type == 'WINDOW')
         with bpy.context.temp_override(window=window, area=area, region=region):
             context = bpy.context
+            if area.type == 'IMAGE_EDITOR' and (context.space_data.mode != 'VIEW'
+                                               or context.space_data.image != review['preview']):
+                end_review('Candidate review closed: image editor changed or entered painting')
+                return
             if (context.scene.as_pointer() != review['scene'] or context.view_layer.name != review['view_layer']
                     or painting.active() or active()
                     or context.active_object is None or context.active_object.as_pointer() != review['owner']
@@ -209,6 +311,14 @@ def _maintain_review():
             if digest(layer.image) != review['digest']:
                 end_review('Candidate review closed: target image edited')
                 return
+            if digest(review['preview']) != review['preview_digest']:
+                end_review('Candidate review closed: preview image edited')
+                return
+            if digest(review['normal_preview']) != review['normal_preview_digest']:
+                end_review('Candidate review closed: normal preview edited')
+                return
+            if area.type == 'VIEW_3D' and review['editor'] == 'IMAGE_EDITOR':
+                _show_candidate(review)
             node = _display_node(layer)
             if node is not None and node.image != review['preview']:
                 # A material rebuild re-referenced the layer image; preview again.
@@ -306,7 +416,7 @@ def tick():
             progress = job['directory'] / 'progress.json'
             if progress.exists() and job['operation'] != 'estimate':
                 data = json.loads(progress.read_text())
-                _status = f"Generated {data['done']}/{data['total']} candidates…"
+                _status = f"{data.get('stage', 'Generated')} {data['done']}/{data['total']} candidates…"
             if job['process'].poll() is None:
                 redraw()
                 return 0.25
@@ -338,15 +448,7 @@ def tick():
                 if digest(layer.image) != job['digest']:
                     raise ValueError('Target image was edited while generating; result discarded')
                 seeds = job['settings'].get('seeds') or [job['settings']['seed']]
-                if len(seeds) > 1:
-                    # Batch results wait for review; the display swaps to the
-                    # preview datablock and the viewport stays interactive.
-                    _begin_review(bpy.context, job, seeds)
-                else:
-                    rgba = capture.returned_pixels(job['directory'] / 'result.png', layer.image.size, job['metadata'])
-                    result.apply(bpy.context, rgba, job['metadata']['weights'])
-                    layer.generation_last_seed = str(seeds[0])
-                    _status = 'Applied generation · Seed ' + str(seeds[0])
+                _begin_review(bpy.context, job, seeds)
     except Exception as exc:
         _status = 'Generation: ' + str(exc)
         print('Pawprint:', _status)
@@ -404,6 +506,8 @@ class PAWPRINT_OT_generate(bpy.types.Operator):
             stack = model.active_stack(context)
             layer = model.active_layer(stack)
             result.validate_image(layer.image)
+            if not chord_ready():
+                raise ValueError('Generation requires Chord albedo estimation; install the Chord model and nodes')
             settings = {key: getattr(layer, 'generation_' + key) for key in backend.ALL_PARAMETERS}
             settings['adapter'] = layer.generation_adapter
             if settings['batch'] > 1:
@@ -425,6 +529,7 @@ class PAWPRINT_OT_generate(bpy.types.Operator):
             settings['loras'] = [{'name': item.model, 'strength': item.strength}
                                  for item in layer.generation_loras]
             backend.validate(settings, _capabilities)
+            _ensure_layer_display(layer)
             record_prompt(context.scene.pawprint_positive_history, settings['positive'])
             record_prompt(context.scene.pawprint_negative_history, settings['negative'])
             directory = Path(tempfile.mkdtemp(prefix='pawprint-job-'))
@@ -506,6 +611,58 @@ class PAWPRINT_OT_cancel_generation(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def review_context(context):
+    return bool(_review and context.window == _review['window'] and context.area == _review['area']
+                and context.area.type in {'VIEW_3D', 'IMAGE_EDITOR'} and not painting.active())
+
+
+class PAWPRINT_OT_candidate_version(bpy.types.Operator):
+    bl_idname = 'pawprint.candidate_version'
+    bl_label = 'Compare Generation'
+    bl_description = 'Debug comparison only: Apply and Layer always use Chord albedo and surface-relative normal'
+    version: bpy.props.EnumProperty(items=[('ORIGINAL', 'Original', ''), ('ALBEDO', 'Albedo + Normal', '')])
+
+    @classmethod
+    def poll(cls, context):
+        return review_context(context)
+
+    def execute(self, context):
+        _maintain_review()
+        if not _review:
+            return {'CANCELLED'}
+        _review['version'] = self.version
+        _show_candidate(_review)
+        redraw()
+        return {'FINISHED'}
+
+
+class PAWPRINT_OT_candidate_editor(bpy.types.Operator):
+    bl_idname = 'pawprint.candidate_editor'
+    bl_label = 'Switch Review Editor'
+    bl_description = 'Switch this area between the viewport and Image Editor without ending review'
+    editor: bpy.props.EnumProperty(items=[('VIEW_3D', 'Viewport', ''), ('IMAGE_EDITOR', 'Image Editor', '')])
+
+    @classmethod
+    def poll(cls, context):
+        return review_context(context)
+
+    def execute(self, context):
+        _maintain_review()
+        if not _review:
+            return {'CANCELLED'}
+        area = context.area
+        area.type = self.editor
+        if self.editor == 'IMAGE_EDITOR':
+            area.spaces.active.mode = 'VIEW'
+            area.spaces.active.image = _review['preview']
+            area.spaces.active.show_region_ui = True
+            _review['editor'] = self.editor
+        else:
+            _show_candidate(_review)
+        redraw()
+        return {'FINISHED'}
+
+
 class PAWPRINT_OT_candidate_select(bpy.types.Operator):
     bl_idname = 'pawprint.candidate_select'
     bl_label = 'Browse Candidates'
@@ -515,10 +672,11 @@ class PAWPRINT_OT_candidate_select(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return _review is not None and not painting.active()
+        return review_context(context)
 
     def execute(self, context):
         global _status
+        _maintain_review()
         review = _review
         if not review:
             return {'CANCELLED'}
@@ -533,61 +691,89 @@ class PAWPRINT_OT_candidate_select(bpy.types.Operator):
 class PAWPRINT_OT_commit_candidate(bpy.types.Operator):
     bl_idname = 'pawprint.commit_candidate'
     bl_label = 'Apply Candidate'
-    bl_description = ('Apply the shown candidate to the layer with one native undo step '
+    bl_description = ('Apply Chord albedo and normal to the layer with one native undo step '
                       'and adopt its seed for the next request')
 
     @classmethod
     def poll(cls, context):
-        from .operators import viewport
-        return bool(_review is not None and not active() and not painting.active()
-                    and context.object and context.object.mode == 'OBJECT' and viewport(context)[0])
+        return review_context(context) and not active()
 
     def execute(self, context):
         global _status
+        _maintain_review()
         review = _review
         if not review:
             return {'CANCELLED'}
         index, seeds = review['index'], review['seeds']
         rgba = review['candidates'][index].astype(np.float32) / 255.0
+        from . import normals
+        normal_values = normals.merged(review['layer_normal'], review['normals'][index], review['weights'])
         weights = review['weights']
+        window, area = review['window'], review['area']
+        editor = area.type
+        image = review['layer_image']
         # Restore the layer display before applying so the managed paint session
         # and the material both show the real layer image again.
         end_review(f'Applying candidate {index + 1}/{len(seeds)}…')
+        new_normal = None
+        old_normal = None
         try:
-            layer = model.active_layer(model.active_stack(context))
-            result.apply(context, rgba, weights)
-            layer.generation_seed = layer.generation_last_seed = seeds[index]
+            area.type = 'VIEW_3D'
+            region = next(r for r in area.regions if r.type == 'WINDOW')
+            with bpy.context.temp_override(window=window, area=area, region=region):
+                layer = model.active_layer(model.active_stack(bpy.context))
+                old_normal = layer.normal
+                new_normal = normals.image(normal_values)
+                layer.normal = new_normal
+                result.apply(bpy.context, rgba, weights)
+                layer.generation_seed = layer.generation_last_seed = seeds[index]
             _status = f'Applied candidate {index + 1}/{len(seeds)} · seed {seeds[index]}'
             redraw()
             return {'FINISHED'}
         except Exception as exc:
+            if new_normal is not None:
+                layer.normal = old_normal
+                bpy.data.images.remove(new_normal)
             _status = 'Candidate apply: ' + str(exc)
             print('Pawprint:', _status)
             self.report({'ERROR'}, str(exc))
             return {'CANCELLED'}
+        finally:
+            if editor == 'IMAGE_EDITOR':
+                area.type = editor
+                area.spaces.active.mode = 'VIEW'
+                area.spaces.active.image = image
+                image.use_view_as_render = False
 
 
 class PAWPRINT_OT_candidate_layer(bpy.types.Operator):
     bl_idname = 'pawprint.candidate_layer'
     bl_label = 'Add Candidate as Layer'
-    bl_description = ('Keep the shown candidate as a new editable layer above the source, '
+    bl_description = ('Keep Chord albedo and normal as a new layer above the source, '
                       'adopting its seed there; the source layer stays unchanged')
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
     def poll(cls, context):
-        return _review is not None and not painting.active()
+        return review_context(context)
 
     def execute(self, context):
         global _status
+        _maintain_review()
         review = _review
         if not review:
             return {'CANCELLED'}
         index, seeds = review['index'], review['seeds']
         candidate, seed = review['candidates'][index], str(seeds[index])
+        from . import normals
+        normal_values = review['normals'][index].copy()
+        # Context padding is input only, never editable candidate-layer coverage.
+        candidate = candidate.copy()
+        candidate[:, :, 3] = np.round(candidate[:, :, 3] * review['weights']).astype(np.uint8)
+        normal_values[:, :, 3] *= review['weights']
         material, source_index = review['material'], review['index_in_stack']
         end_review(f'Adding candidate {index + 1}/{len(seeds)} as a layer…')
-        image = None
+        image = normal_image = None
         try:
             source = material.pawprint.layers[source_index]
             image = bpy.data.images.new('Pawprint Candidate', width=candidate.shape[1],
@@ -595,6 +781,7 @@ class PAWPRINT_OT_candidate_layer(bpy.types.Operator):
             image.pixels.foreach_set((candidate.astype(np.float32) / 255.0).ravel())
             image.update()
             image.pack()
+            normal_image = normals.image(normal_values)
             stack = material.pawprint
             layer = stack.layers.add()
             # Mirror the proven add_projection order: no field written here
@@ -610,7 +797,7 @@ class PAWPRINT_OT_candidate_layer(bpy.types.Operator):
             layer.generation_seed = layer.generation_last_seed = seed
             layer.name = 'Candidate'
             # The candidate lives in the source layer's saved view; its depth
-            # snapshot still describes that view, so both are shared as-is.
+            # snapshot still describes that view and is shared.
             layer.depth = source.depth
             for field in ('width', 'height', 'view_matrix', 'projection', 'view_rotation',
                           'view_location', 'view_distance', 'lens', 'clip_start', 'clip_end'):
@@ -623,12 +810,17 @@ class PAWPRINT_OT_candidate_layer(bpy.types.Operator):
             # Rebind: collection moves invalidate the wrapper layers.add()
             # returned, and later writes through it would be silently lost.
             layer = stack.layers[target]
+            layer.normal = normal_image
             # Assign last so the material rebuild sees the final stack order.
             layer.image = image
+            if context.area.type == 'IMAGE_EDITOR':
+                context.area.spaces.active.image = image
             _status = f'Added candidate {index + 1}/{len(seeds)} as a new layer · seed {seed}'
             redraw()
             return {'FINISHED'}
         except Exception as exc:
+            if normal_image is not None and normal_image.users == 0:
+                bpy.data.images.remove(normal_image)
             if image is not None and image.users == 0:
                 bpy.data.images.remove(image)
             _status = 'Candidate layer: ' + str(exc)
@@ -644,13 +836,18 @@ class PAWPRINT_OT_discard_candidates(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return _review is not None
+        return review_context(context)
 
     def execute(self, context):
         global _status
+        _maintain_review()
         review = _review
+        if not review:
+            return {'CANCELLED'}
         index = review['index']
         del review['candidates'][index]
+        del review['originals'][index]
+        del review['normals'][index]
         del review['seeds'][index]
         if not review['seeds']:
             end_review('All candidates discarded')
@@ -672,7 +869,7 @@ class PAWPRINT_OT_preview_context(bpy.types.Operator):
     def poll(cls, context):
         from .operators import viewport
         layer = model.active_layer(model.active_stack(context))
-        return bool(not active() and not painting.active() and layer and layer.image
+        return bool(not active() and not review_active() and not painting.active() and layer and layer.image
                     and context.object and context.object.mode == 'OBJECT' and viewport(context)[0])
 
     def execute(self, context):
@@ -705,7 +902,7 @@ class PAWPRINT_OT_preview_depth(bpy.types.Operator):
     def poll(cls, context):
         from .operators import viewport
         layer = model.active_layer(model.active_stack(context))
-        return bool(not active() and not painting.active() and layer and layer.image
+        return bool(not active() and not review_active() and not painting.active() and layer and layer.image
                     and context.object and context.object.mode == 'OBJECT' and viewport(context)[0])
 
     def execute(self, context):
@@ -786,7 +983,8 @@ class PAWPRINT_OT_lora_remove(bpy.types.Operator):
 CLASSES = (PAWPRINT_PG_choice, PAWPRINT_PG_prompt, PAWPRINT_OT_connect, PAWPRINT_OT_generate,
            PAWPRINT_OT_cancel_generation, PAWPRINT_OT_apply_prompt,
            PAWPRINT_OT_clear_prompt_history, PAWPRINT_OT_preview_context, PAWPRINT_OT_preview_depth,
-           PAWPRINT_OT_candidate_select, PAWPRINT_OT_commit_candidate, PAWPRINT_OT_candidate_layer,
+            PAWPRINT_OT_candidate_select, PAWPRINT_OT_commit_candidate, PAWPRINT_OT_candidate_layer,
+           PAWPRINT_OT_candidate_version, PAWPRINT_OT_candidate_editor,
            PAWPRINT_OT_discard_candidates, PAWPRINT_OT_lora_add, PAWPRINT_OT_lora_remove)
 HANDLERS = ('save_pre', 'load_pre', 'undo_pre', 'redo_pre')
 
@@ -813,6 +1011,7 @@ def register():
 
 
 def unregister():
+    end_review('Candidate review closed by extension reload/disable')
     cancel('Cancelled by extension reload/disable')
     if bpy.app.timers.is_registered(tick):
         bpy.app.timers.unregister(tick)

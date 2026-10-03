@@ -19,7 +19,7 @@ approaches into requirements. Update relevant pages when decisions change.
 
 ## Current implementation
 
-The development prototype supports an unlit UV base and ordered native RGBA
+The development prototype supports a diffuse-lit UV albedo base and ordered native RGBA
 projection layers per target slot, each with a saved perspective view/frame and
 visibility snapshot. A layer list supports selection, naming, ordering, visibility,
 and removal; new frames can be previewed before capture. Native 2D Image Editor
@@ -85,7 +85,22 @@ Previous/Next switching, Apply commits via the native clone and adopts the
 chosen seed, Layer keeps the shown candidate as a new editable layer above the
 source sharing its saved view/depth snapshot with the candidate's seed, Discard
 drops only the shown candidate (review ends when the last is gone);
-save/load/undo/target change ends it).
+save/load/undo/target change ends it). Single results also enter review. Shared
+Original/Albedo + Normal and Viewport/Image Editor controls preserve comparison
+state across candidate/editor switches; originals are review-only. Apply/Layer
+always commit paired Chord albedo/normal, including when Original is shown. Apply in
+Image Editor temporarily uses a 3D context for native clone undo and returns to
+the committed image. Each generated image passes through tiled Chord albedo
+and normal estimation before review (1024² tiles, 128px overlap). Batches finish generation
+before processing albedo sequentially to reduce model swaps. Chord is required;
+its ModelPatcher uses ComfyUI offloading, without global unload/interrupt.
+Original alpha and selection placement are preserved. Shading-reference
+capture/recapture and reference division have been removed.
+Selected generation now matches Chord albedo to a fresh unlit target-slot stack
+capture using trusted unchanged boundary pixels outside the feathered edit area.
+Weighted LAB correction changes editable RGB only; no additional Chord pass.
+Other surfaces and untouched initial-gray base are excluded; absent/insufficient
+boundary texture skips matching. Normals and Original review remain unchanged.
 Prompt fields keep a per-scene history dropdown recorded at Generate time (deduped,
 capped at 32). New layers inherit the selected layer's generation settings, or the
 last-used snapshot when the stack is empty (commit-all/removal). New layers start
@@ -94,15 +109,22 @@ input crop used by Generate without requiring ComfyUI. Commit Through Selected
 to Base bakes the bottom contiguous group into a new packed base copy at the
 scene-configured base resolution (default 2048², no upper limit; existing base
 content resampled) with one-step undo; an optional per-stack Keep keeps the
-committed sources hidden instead of removing them. A derived PBR slice is in:
-Estimate Albedo & Normal bakes the visible stack into a temporary UV composite,
-runs the tiled Chord workflow on ComfyUI (albedo + normal only; roughness and
-metalness stay unconnected), and applies packed maps into a separate
-Pawprint PBR material paired with the stack via a pawprint_source
-back-reference; a Generation/Material view toggle swaps the slot material and
-material view blocks all editing operators (active_stack resolves to None).
-Re-estimates reuse the same material/nodes/map datablocks in place —
-remove+rename image swaps scramble node-image pointers across memfile undo.
+committed sources hidden instead of removing them. The final Estimate Albedo &
+Normal command is removed: the working diffuse-lit material already stores
+albedo. Existing derived PBR material view/build helpers remain, but no estimate
+command is exposed. Chord normals now use surface-relative detail at fixed strength
+1.0, saved-camera right/down/toward basis, normalized layer composition, shared
+visibility/alpha and mirror reflection. Packed float Non-Color normal images use
+Channel Packed alpha to avoid Eevee unpremultiplication. Apply replaces the normal
+snapshot immutably before the native albedo dab; one undo restores both channels.
+Layer retains both returned maps with selection-limited alpha; review preserves
+the existing layer outside the selected/feathered footprint. Context capture uses
+viewport subdivision levels, not render-only levels. Commit to Base additionally
+bakes a tangent-space normal UV map via native Cycles NORMAL (+X/+Y/+Z, OpenGL).
+The base uses a tangent-space Normal Map node; new detail reorients around the
+lower composed normal, preserving it for neutral estimates. Mesh curvature is
+not baked as detail. Prior object-space prototype bases require manual replacement
+or rebaking from retained sources, not migration. Normal painting is not yet exposed.
 Merge down and composite
 depth remain future slices. Geometry is the agreed default depth source.
 Existing single-projection data migrates on load/reload.
@@ -114,21 +136,27 @@ Existing single-projection data migrates on load/reload.
   including the winding-independent axial occlusion z-test with a two-texel
   grazing margin extracted from the pure saved-window matrix; mirror-folded
   fragments skip the axial gate, reusing the kept half's visibility by design.
+- `pawprint/normals.py`: packed normal images, selection-limited vector merging and surface-relative shader basis.
 - `pawprint/operators.py`: stack/layer creation, view restoration, image editing.
 - `pawprint/overlay.py`: viewport-only saved-image frame.
 - `pawprint/painting.py`: managed native saved-frame painting and session cleanup.
 - `pawprint/selection.py`: per-layer image-space lasso, raster footprints and context bounds.
 - `pawprint/ui.py`: sidebar panels.
 - `pawprint/backend.py`: SDXL parameter/capability contract and bpy-free HTTP worker.
-- `pawprint/capture.py`: scoped saved-view render/crop and returned patch placement.
+- `pawprint/capture.py`: shared saved-frame render, scoped context/crop and returned patch placement.
+- `pawprint/colormatch.py`: bpy-free, weighted boundary LAB matching against fresh unlit stack albedo.
 - `pawprint/result.py`: native clone result application and paint-setting restoration.
 - `pawprint/generation.py`: discovery, per-request ownership, async process lifecycle/UI operators.
 - `pawprint/baking.py`: slot-isolated Cycles emission bake and commit-through-selected operator.
-- `pawprint/pbr.py`: derived PBR material build/rebuild, Chord estimate/apply operators and the view-mode slot swap.
+- `pawprint/pbr.py`: derived PBR material helpers and existing-material view-mode slot swap; final estimate command removed.
 - `tools/backend_test.py`: fake-server errors, capabilities and owned cancellation checks.
+- `tools/colormatch_test.py`: boundary statistics, colour shifts and exact alpha/outside preservation.
+- `tools/albedo_reference_test.py`: isolated emission reference, trusted coverage, occlusion and failure cleanup.
 - `tools/generation_test.py`: live shipped-operator capture/apply/undo and stale-target checks.
 - `tools/baking_test.py`: isolated UV commit bake, one-step undo/redo, interleave and persistence checks.
 - `tools/pbr_probe.py`: isolated composite bake, PBR build/rebuild wiring, view-mode gate, apply/stale rejection and pointer-cycle persistence checks.
+- `tools/normal_probe.py`: isolated single-view Chord normal experiment, saved-camera versus surface-relative interpretation, shader calibration and relighting; not a production normal channel.
+- `tools/normal_test.py`: production normal axes, alpha, mirror, saved basis, composition, paired UV bake/undo and persistence.
 - `tools/smoke_test.py`: isolated Blender registration/reload smoke check.
 - `tools/projection_test.py`: isolated Cycles/Eevee render and persistence checks.
 - `tools/image_undo_probe.py`: direct-pixel/global-undo feasibility probe.
@@ -171,6 +199,9 @@ Existing single-projection data migrates on load/reload.
   buffer application. Selection metadata is separate from image alpha; the stencil
   is session-only, not a persistent editable layer mask. Preserve off-target
   selections when computing padded context bounds.
+- Generation uses Chord albedo before review; there are no shading references or
+  reference-division compensation. Review originals are temporary; Apply/Layer
+  always use paired albedo/normal candidates, preserving original alpha and selection placement.
 - The layer's stored depth image is an internal visibility snapshot, not ControlNet
   guidance. Geometry guidance is freshly computed from the saved view and current
   visible geometry, independently of that snapshot. Geometry is the default depth

@@ -123,53 +123,6 @@ def begin_apply(job):
         _pending = None
 
 
-class PAWPRINT_OT_estimate_pbr(bpy.types.Operator):
-    bl_idname = 'pawprint.estimate_pbr'
-    bl_label = 'Estimate Albedo & Normal'
-    bl_description = ('Bake the base and layers into UV space, estimate albedo and normal maps '
-                      'with Chord on ComfyUI, then rebuild the derived PBR material')
-    bl_options = {'REGISTER'}
-
-    @classmethod
-    def poll(cls, context):
-        from .operators import viewport
-        stack = model.active_stack(context)
-        return bool(not generation.active() and not generation.review_active()
-                    and not _painting() and stack and stack.base
-                    and context.object and context.object.mode == 'OBJECT'
-                    and generation.connected(context) and generation.chord_ready()
-                    and viewport(context)[0])
-
-    def execute(self, context):
-        from pathlib import Path
-        import tempfile
-        stack = model.active_stack(context)
-        composite = None
-        directory = None
-        try:
-            composite = baking.bake_composite(context, stack)
-            digest = _stack_digest(stack)
-            directory = Path(tempfile.mkdtemp(prefix='pawprint-job-'))
-            capture.save_reference(directory / 'input.png', composite)
-            bpy.data.images.remove(composite)
-            composite = None
-            generation.launch('estimate', context, directory,
-                              settings=dict(chord=generation.chord_model(), tile=1024, overlap=128),
-                              owner=context.object.as_pointer(), material=stack.id_data.as_pointer(),
-                              slot=context.object.active_material_index,
-                              fingerprint=model.fingerprint_stack(stack), digest=digest)
-            return {'FINISHED'}
-        except Exception as exc:
-            if composite is not None:
-                bpy.data.images.remove(composite)
-            if directory:
-                import shutil
-                shutil.rmtree(directory, ignore_errors=True)
-            generation.set_status(str(exc))
-            self.report({'ERROR'}, str(exc))
-            return {'CANCELLED'}
-
-
 class PAWPRINT_OT_apply_pbr(bpy.types.Operator):
     bl_idname = 'pawprint.apply_pbr'
     bl_label = 'Apply PBR Maps'
@@ -240,7 +193,7 @@ class PAWPRINT_OT_view_mode(bpy.types.Operator):
         return {'CANCELLED'}
 
 
-CLASSES = (PAWPRINT_OT_estimate_pbr, PAWPRINT_OT_apply_pbr, PAWPRINT_OT_view_mode)
+CLASSES = (PAWPRINT_OT_apply_pbr, PAWPRINT_OT_view_mode)
 
 
 def register():

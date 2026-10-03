@@ -154,6 +154,10 @@ def check_capture(bpy, material, area):
     assert material.pawprint.preview
     assert bpy.ops.pawprint.add_projection() == {'FINISHED'}
     assert not material.pawprint.preview
+    layer = material.pawprint.layers[0]
+    assert not any(i.name.startswith('Pawprint Shading Reference') for i in bpy.data.images)
+    assert not hasattr(bpy.types, 'PAWPRINT_OT_recapture_shading')
+    assert not hasattr(bpy.types, 'PAWPRINT_OT_estimate_pbr')
     region = bpy.context.region
     points = extension.overlay.frame_corners(material.pawprint.layers[0], region, area.spaces.active.region_3d)
     width, height = extension.projection.frame_size(region, 1)
@@ -184,6 +188,7 @@ def check_capture(bpy, material, area):
     assert bpy.ops.pawprint.add_projection() == {'FINISHED'}
     assert len(material.pawprint.layers) == 2
     created = material.pawprint.layers[1]
+    assert not any(i.name.startswith('Pawprint Shading Reference') for i in bpy.data.images)
     for key in extension.backend.ALL_PARAMETERS:
         assert getattr(created, 'generation_' + key) == getattr(previous, 'generation_' + key)
     assert created.generation_adapter == 'ZIT'

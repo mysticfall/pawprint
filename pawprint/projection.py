@@ -11,6 +11,8 @@ import bpy
 from mathutils import Matrix, Vector
 from mathutils.bvhtree import BVHTree
 
+BASE_GRAY = .18
+
 
 # Local-axis mirror choices: the selected direction names the half that is kept;
 # fragments on the opposite side of the object's local plane sample the mirrored
@@ -115,7 +117,7 @@ def depth_image(context, stack, space=None):
 
 def new_image(name, width, height, pattern=False, transparent=False):
     image = bpy.data.images.new(name, width, height, alpha=True)
-    image.generated_color = (0, 0, 0, 0) if pattern or transparent else (0.18, 0.18, 0.18, 1)
+    image.generated_color = (0, 0, 0, 0) if pattern or transparent else (BASE_GRAY, BASE_GRAY, BASE_GRAY, 1)
     if pattern:
         pixels = array('f')
         for y in range(height):
@@ -132,7 +134,7 @@ def new_image(name, width, height, pattern=False, transparent=False):
     return image
 
 
-def build_material(material):
+def build_material(material, emission=False, normal_bake=False, albedo_reference=False):
     stack = material.pawprint
     material.use_nodes = True
     tree = material.node_tree
@@ -181,6 +183,23 @@ def build_material(material):
 
     owner = stack.owner
     color = base.outputs['Color']
+    if albedo_reference:
+        # Initial gray base is not evidence of an established texture palette.
+        # Explicit painted-layer coverage below remains trusted even if gray.
+        gray = ((BASE_GRAY + .055) / 1.055) ** 2.4
+        difference = vector_math('SUBTRACT', color, (gray, gray, gray))
+        texture_coverage = math('MULTIPLY', base.outputs['Alpha'],
+                                math('GREATER_THAN', vector_math('DOT_PRODUCT', difference, difference), 1e-6))
+    normal = geometry.outputs['Normal']
+    if stack.base_normal:
+        base_normal = node('ShaderNodeTexImage', 'Pawprint Base Normal', -150, 650)
+        base_normal.image = stack.base_normal
+        tree.links.new(uv.outputs['UV'], base_normal.inputs['Vector'])
+        tangent_normal = node('ShaderNodeNormalMap', 'Base Tangent Normal', 100, 650)
+        tangent_normal.space = 'TANGENT'
+        tangent_normal.uv_map = stack.uv_name
+        tree.links.new(base_normal.outputs['Color'], tangent_normal.inputs['Color'])
+        normal = tangent_normal.outputs['Normal']
     for stack in [layer for layer in stack.layers if layer.image and layer.depth]:
         transform = matrix(stack.projection)
         position = geometry.outputs['Position']
@@ -221,6 +240,7 @@ def build_material(material):
             image_coordinates.append(coordinate)
             tree.links.new(coordinate, coordinates.inputs[i])
         layer = node('ShaderNodeTexImage', 'Pawprint Layer', 450, 200)
+        layer['pawprint_albedo_layer'] = stack.path_from_id()
         layer.image = stack.image
         layer.extension = 'CLIP'
         tree.links.new(coordinates.outputs[0], layer.inputs['Vector'])
@@ -292,15 +312,58 @@ def build_material(material):
         visible = node('ShaderNodeValue', 'Pawprint Visibility', 700, 0)
         visible.outputs[0].default_value = float(stack.visible)
         alpha = math('MULTIPLY', layer.outputs['Alpha'], math('MULTIPLY', coverage, visible.outputs[0]))
+        if albedo_reference:
+            texture_coverage = math('ADD', alpha,
+                                    math('MULTIPLY', texture_coverage, math('SUBTRACT', 1, alpha)))
         mix = node('ShaderNodeMixRGB', 'Layer Over Base', 1000, 300)
         tree.links.new(alpha, mix.inputs[0])
         tree.links.new(color, mix.inputs[1])
         tree.links.new(layer.outputs['Color'], mix.inputs[2])
         color = mix.outputs[0]
+        if not emission or normal_bake:
+            from . import normals
+            estimated, normal_texture = normals.surface_nodes(
+                tree, stack, coordinates.outputs[0], normal, fold,
+                axis_node.outputs[0] if fold is not None else None)
+            normal_mix = node('ShaderNodeMixRGB', 'Normal Over Base', 1000, -700)
+            normal_texture['pawprint_layer'] = stack.path_from_id()
+            enabled = node('ShaderNodeValue', 'Normal Enabled', 700, -700)
+            enabled['pawprint_layer'] = stack.path_from_id()
+            enabled.outputs[0].default_value = float(stack.normal is not None)
+            normal_alpha = math('MULTIPLY', math('MINIMUM', layer.outputs['Alpha'], normal_texture.outputs['Alpha']),
+                                math('MULTIPLY', coverage, visible.outputs[0]))
+            tree.links.new(math('MULTIPLY', normal_alpha, enabled.outputs[0]), normal_mix.inputs[0])
+            tree.links.new(normal, normal_mix.inputs[1])
+            tree.links.new(estimated, normal_mix.inputs[2])
+            normal = vector_math('NORMALIZE', normal_mix.outputs[0], (0, 0, 0))
         tree.nodes.active = layer
         layer.select = True
 
-    emission = node('ShaderNodeEmission', 'Unlit Appearance', 1250, 300)
-    tree.links.new(color, emission.inputs['Color'])
+    if normal_bake:
+        transform_normal = node('ShaderNodeVectorTransform', 'Bake Object Normal', 1000, 600)
+        transform_normal.vector_type = 'NORMAL'
+        transform_normal.convert_from, transform_normal.convert_to = 'WORLD', 'OBJECT'
+        tree.links.new(normal, transform_normal.inputs[0])
+        encoded = vector_math('ADD', vector_math('MULTIPLY',
+            vector_math('NORMALIZE', transform_normal.outputs[0], (0, 0, 0)), (.5, .5, .5)), (.5, .5, .5))
+        shader = node('ShaderNodeEmission', 'Normal Bake', 1250, 300)
+        tree.links.new(encoded, shader.inputs['Color'])
+    elif emission:
+        shader = node('ShaderNodeEmission', 'Albedo Bake', 1250, 300)
+        tree.links.new(color, shader.inputs['Color'])
+        if albedo_reference:
+            holdout = node('ShaderNodeHoldout', 'Unpainted Reference', 1250, 600)
+            mix = node('ShaderNodeMixShader', 'Trusted Albedo Reference', 1500, 300)
+            tree.links.new(texture_coverage, mix.inputs[0])
+            tree.links.new(holdout.outputs[0], mix.inputs[1])
+            tree.links.new(shader.outputs[0], mix.inputs[2])
+            shader = mix
+    else:
+        shader = node('ShaderNodeBsdfPrincipled', 'Diffuse Albedo', 1250, 300)
+        shader.inputs['Metallic'].default_value = 0
+        shader.inputs['Roughness'].default_value = 1
+        shader.inputs['Specular IOR Level'].default_value = 0
+        tree.links.new(color, shader.inputs['Base Color'])
+        tree.links.new(normal, shader.inputs['Normal'])
     output = node('ShaderNodeOutputMaterial', 'Material Output', 1500, 300)
-    tree.links.new(emission.outputs[0], output.inputs['Surface'])
+    tree.links.new(shader.outputs[0], output.inputs['Surface'])

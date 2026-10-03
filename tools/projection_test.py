@@ -20,6 +20,11 @@ def load_extension():
 def setup_fixture(bpy):
     scene = bpy.data.scenes.new("Pawprint Projection Test")
     bpy.context.window.scene = scene
+    scene.world = bpy.data.worlds.new('Uniform fixture lighting')
+    scene.world.use_nodes = True
+    background = scene.world.node_tree.nodes.get('Background')
+    background.inputs['Color'].default_value = (1, 1, 1, 1)
+    background.inputs['Strength'].default_value = 1
     mesh = bpy.data.meshes.new("Target surfaces")
     # Left/right target slots and a rear face hidden from the saved eye.
     mesh.from_pydata(
@@ -50,7 +55,8 @@ def setup_fixture(bpy):
     camera_data.lens = 50
     scene.camera = camera
     scene.render.engine = 'CYCLES'
-    scene.cycles.samples = 1
+    scene.cycles.samples = 32
+    scene.cycles.max_bounces = 1
     scene.render.resolution_x = scene.render.resolution_y = 128
     scene.render.resolution_percentage = 100
     scene.view_settings.view_transform = 'Standard'
@@ -84,11 +90,31 @@ def create_projection(bpy, extension, obj, camera):
 
 
 def render_pixels(bpy, path):
+    """Measure projection/commit albedo independently of scene illumination.
+
+    Use disposable emission copies, as the commit bake does. The actual lit
+    Principled path and inverse reference are exercised by shading_test.py.
+    """
+    import pawprint as extension
     scene = bpy.context.scene
     scene.render.image_settings.file_format = 'OPEN_EXR'
     scene.render.image_settings.color_depth = '32'
     scene.render.filepath = str(path)
-    bpy.ops.render.render(write_still=True)
+    replacements = []
+    try:
+        for obj in scene.objects:
+            for slot in obj.material_slots:
+                material = slot.material
+                if material and material.pawprint.enabled:
+                    copy = material.copy()
+                    extension.projection.build_material(copy, emission=True)
+                    replacements.append((slot, material, copy))
+                    slot.material = copy
+        bpy.ops.render.render(write_still=True)
+    finally:
+        for slot, material, copy in replacements:
+            slot.material = material
+            bpy.data.materials.remove(copy)
     image = bpy.data.images.load(str(path), check_existing=False)
     pixels = list(image.pixels[:])
     bpy.data.images.remove(image)
@@ -100,6 +126,9 @@ def worker(directory, engine='CYCLES'):
     from mathutils import Vector
     extension = load_extension()
     scene, obj, original = setup_fixture(bpy)
+    # These emission-only projection checks need a black background at grazing
+    # silhouettes; live generation probes use the fixture's lit world instead.
+    scene.world.node_tree.nodes.get('Background').inputs['Strength'].default_value = 0
     scene.render.engine = engine
     stack = create_projection(bpy, extension, obj, scene.camera)
     assert obj.material_slots[1].material == original
@@ -311,7 +340,7 @@ def worker(directory, engine='CYCLES'):
     occluded = render_pixels(bpy, directory / 'occlusion.exr')
     expected_base = linear(obj.active_material.pawprint.base.pixels[(50 * 128 + 91) * 4])
     assert max(abs(a - b) for a, b in zip(pixel(occluded, 91, 50), (expected_base,) * 3)) < 0.025, \
-        ('Far-side surface leaked through the plane test', pixel(occluded, 91, 50))
+        ('Far-side surface leaked through the plane test', pixel(occluded, 91, 50), expected_base)
     assert max(abs(a - b) for a, b in zip(pixel(occluded, 40, 40), pixel(edited, 40, 40))) < 0.025, \
         'Occlusion test cut visible coverage'
     stack_layer['depth_tolerance'] = saved_tolerance

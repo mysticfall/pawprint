@@ -444,35 +444,65 @@ Fun ControlNet Union patch; fake-server unit tests cover dispatch, capability
 filtering, patch gating, node wiring, LoRA skipping and upload counts
 (input/mask/depth).
 
-## Implemented batch review
+## Implemented generation review
 Both adapters expose a **Batch** count (any positive integer; the slider's soft
 maximum is eight, larger counts can be typed). Above one, Generate resolves one
 random 64-bit seed per candidate client-side (the seed field is bypassed) and the
 worker submits one prompt per seed, reusing the single set of uploads. Results
-arrive as `result-<i>.png` with `progress.json {done,total}`; single-image jobs
-keep the previous `result.png`/`queued.json` contract. Cancellation and failure
+arrive first as `original-<i>.png`, then each runs through a separate tiled Chord
+prompt to produce albedo `result-<i>.png` and normal `normal-<i>.png`. Single-image names are `original.png`
+and `result.png`. `progress.json {stage,done,total}` distinguishes generation and
+albedo/normal estimation. All generation prompts precede Chord prompts, reducing model
+swaps; Chord uses normal ComfyUI ModelPatcher offloading. Albedo and normal are merged
+and downloaded from the same inference (the node still predicts all maps). Both
+outputs are required before review; single normals use `normal.png`. Cancellation and failure
 retire every prompt this worker owns with one `/queue` delete call — never the
 global interrupt.
 
-On completion the UI enters review mode: candidates are held in memory and shown
+Before review, selected results receive client-side boundary albedo matching:
+the submission-time emission reference of the existing target-slot stack stays
+in client metadata, not the lit upload. Each candidate uses the same reference,
+crop and edit footprint. Weighted LAB matching uses unchanged trusted boundary
+pixels only, corrects editable RGB, and leaves normals/originals untouched. No
+additional model, ComfyUI prompt, dependency or GPU inference is introduced;
+insufficient boundary data skips matching. See the
+[matching contract](editing-and-generation.md#post-chord-boundary-albedo-matching).
+
+On completion both single and batch jobs enter review mode: aligned originals
+and paired Chord albedo/normal candidates are held in memory and shown
 through a temporary preview datablock swapped into the layer's texture node, so
-the viewport stays fully interactive (no modal, no navigation lock). Every
-Previous/Next switch swaps in a **fresh** preview datablock and removes the old
+the viewport stays fully interactive (no modal, no navigation lock). In the viewport,
+every candidate or Original/Albedo + Normal switch swaps in a **fresh** preview datablock and removes the old
 one: rewriting the pixels of an image the viewport shader already bound left the
 GPU texture stale in interactive use, while a datablock swap reliably refreshes
-it. The sidebar
+it. Image Editor switches instead update its existing preview image, avoiding
+the native zoom/pan reset that a datablock swap triggers on the next redraw.
+Returning to the viewport refreshes its datablock again. The sidebar
 offers Previous/Next, **Apply** (closes review, applies through the native clone
 with one undo step, and adopts the chosen candidate's seed into the layer's seed
-field and last-seed), **Layer** (keeps the shown candidate as a new editable layer
-directly above the source: a packed byte image of the candidate pixels, the
+field and last-seed), **Layer** (keeps the paired candidate as a new editable layer
+directly above the source: packed byte albedo and float Non-Color normal images, the
 source's saved view/projection metadata and visibility-snapshot images shared,
 generation settings inherited, the candidate's seed adopted on the new layer, the
 source layer untouched, one native undo step) and **Discard**, which drops only
 the shown candidate from the batch — the next candidate slides into its place and
 reviewing continues until the last candidate is discarded, which closes review.
+Review starts on Albedo + Normal. The Original/Albedo + Normal debug choice persists
+across candidates and same-area Viewport/Image Editor switches. Apply and Layer
+always commit both maps, regardless of the debug choice. The Image Editor shows
+selection-limited previews over the original layer; Layer limits both new maps'
+alpha to the same footprint. Rectangular context padding is never candidate-layer
+coverage. Chord still estimates the complete crop. The Image Editor shows
+albedo pixels; normal shading is visible in the viewport. The Image Editor
+displays pixels without render-view exposure/AgX and preserves zoom/pan on version
+switches. Apply from Image Editor temporarily restores a 3D context for native
+clone application, then returns to the committed image. Discard releases both
+versions and their normal map; ending review releases every original and both temporary previews.
 Review validity is
 enforced each timer tick: window/scene/owner/slot/layer/selection identity, image
-digest and node self-healing after material rebuilds. Save/load/undo/redo end
+digest (target and preview) and node self-healing after material rebuilds. Entering
+Image Editor painting or switching away from its candidate image closes review.
+Save/load/undo/redo end
 review before the data change.
 
 The add-as-layer operator mirrors `add_projection`'s proven write order: no field

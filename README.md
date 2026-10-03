@@ -5,7 +5,7 @@ by ComfyUI. The intended workflow is manual seam repair with layered painting an
 inpainting, inspired by Krita AI Diffusion and informed by StableGen.
 
 **The development prototype supports multiple projection layers.** Create an
-unlit UV base, preview and capture perspective layers, edit their native RGBA
+diffuse-lit UV albedo base, preview and capture perspective layers, edit their native RGBA
 images, and reorder or hide them to repair overlapping views.
 **Editing works without a server; Generate now connects to ComfyUI.** The first
 SDXL adapter provides per-layer prompts and sampling controls, selected img2img,
@@ -215,13 +215,13 @@ materials are not baked into the initial gray base.
         is no toggle: the selection alone picks the mode. Each
         request produces one result; Sampling steps is the diffusion
         iteration count, not a batch/candidate count.
-  5. For structural guidance (especially on an initially flat, unlit object), open
+  5. For structural guidance (especially on an initially plain object), open
       **Guidance** and enable **Depth guidance**. Choose the shared union ControlNet
       `sdxl_promax.safetensors` and set **Depth strength** (default 0.5). Geometry is
       the default source. **Preview Geometry Depth**
-      opens the exact guidance crop in the Image Editor; Shift-F5 returns to 3D.
-      Depth contrast uses the visible target inside this crop with percentile
-      clamping; unrelated objects are black (all-geometry fallback for off-target crops).
+       opens the exact guidance crop in the Image Editor; Shift-F5 returns to 3D.
+       Depth contrast uses the visible target inside this crop with percentile
+       clamping; unrelated objects are black (all-geometry fallback for off-target crops).
       Z Image Turbo layers get the same **Depth guidance** toggle, applied through
       a DiffSynth ControlNet patch: **Model Patch Loader** plus the **Apply Qwen
       Image DiffSynth ControlNet** node with the Fun ControlNet Union weights
@@ -254,31 +254,93 @@ materials are not baked into the initial gray base.
   9. Click **Generate**. Clean saved-view capture is synchronous and may briefly pause
      Blender. Uploading, sampling and downloading then run in a separate background
      process while Blender stays interactive. Status and **Cancel Generation** appear below.
- 10. The result replaces the selected footprint in the existing layer with one native
-     image-undo step. Ctrl-Z / Shift-Ctrl-Z undo/redo the pixels without contacting ComfyUI.
-     Save/Pack edited images normally.
+  10. Every result, including a single generation, enters review before changing
+      the editable layer. **Original / Albedo + Normal** compares the aligned raw
+      model output with Chord albedo and normal shading. **Viewport / Image Editor**
+      switches the same area without ending review or resetting the comparison.
+      The Image Editor shows image pixels without AgX/exposure; version toggles
+      preserve zoom/pan. Review starts on **Albedo + Normal** after Chord processing.
     11. Set **Batch** above one (no fixed upper limit — the slider suggests up to
         eight but any count can be typed) to generate that many random-seed
       candidates instead. Each candidate gets its own server request; uploads are
-      shared and progress is reported per image. When the batch finishes, review
+       shared and progress is reported per image. When generation finishes, review
       mode starts: **Previous/Next** switch candidates while their projection is
       shown live on the model — orbiting and zooming stay enabled. **Apply**
-      commits the shown candidate through the same one-step native undo and sets
-      the layer's seed to that candidate; **Layer** keeps the shown candidate as
+        commits paired Chord albedo/normal through one-step native undo and sets
+        the layer's seed to that candidate; **Layer** keeps the albedo candidate as
       a new editable layer directly above the source (shared saved view and
       visibility snapshot, inherited generation settings, the candidate's seed;
       the source layer stays untouched; one undo step removes it again);
       **Discard** drops only the shown candidate; reviewing ends when
       the last one is gone. Review ends automatically on
-      save/load/undo/redo or when the target layer changes.
+       save/load/undo/redo or when the target layer changes. **Apply** and **Layer**
+        always use both estimated channels, even when **Original** is displayed.
+       Originals exist only during review and are released when it ends.
+       Applying in the Image Editor leaves it open showing the committed layer.
+       Ctrl-Z / Shift-Ctrl-Z undo/redo without contacting ComfyUI; Save/Pack normally.
 
 Capture includes all visible layers, other slots and viewport-visible objects using
 scene lighting. It excludes overlays and the scene compositor/sequencer. Input uses
 Standard/sRGB with neutral exposure, avoiding a second display transform when the
 result is projected; the artist's render/color/camera/visibility settings are restored.
 Scene-lighting capture can differ from Material Preview's studio lighting. Modifiers
-follow their viewport enable state; render-specific subdivision levels and other
-engine differences still warrant scene-specific testing.
+follow their viewport enable state and subdivision/multiresolution levels;
+other engine differences still warrant scene-specific testing.
+
+### Per-generation Chord albedo and normals
+
+Generate captures lit context, runs SDXL or Z Image Turbo, then runs tiled Chord
+on every returned image before opening **Original / Albedo + Normal** review. Install
+ComfyUI-Chord and `chord_v1.safetensors`; missing Chord fails before submission.
+The status changes from **Generated** to **Estimating albedo + normal**. A batch finishes
+generation first, then processes its candidates through Chord sequentially.
+This avoids repeatedly swapping diffusion and Chord models for every seed.
+
+Chord uses 1024² tiles with 128px overlap and returns the original crop size.
+Albedo and normal maps are retained from the same inference; original alpha,
+selection and native clone undo remain intact. Roughness and metalness are not
+applied. Its ModelPatcher uses ComfyUI's normal model
+offloading; Pawprint does not globally unload models or interrupt the server.
+There is additional inference time and VRAM demand, even for small crops.
+
+Shading-reference capture, recapture and RGB division have been replaced. The
+final **Estimate Albedo & Normal** command is removed. The working material
+remains matte, nonmetallic Principled under scene lighting, and commit bakes
+store unlit albedo. Chord can alter color/detail or leave lighting artifacts;
+it does not enforce generated geometry. Use **Rendered** shading for scene
+lighting, and the Image Editor to inspect albedo without relighting.
+
+Normals use **surface-relative detail at strength 1.0**, following the chosen
+trial setting. Each packed Non-Color normal image uses its saved camera basis,
+the same projection/visibility as albedo, and normalized layer blending; mirror
+folding reflects normal vectors too. Normal shading is visible in the viewport,
+while the Image Editor review displays albedo. Apply updates both channels within
+the selected/feathered footprint; Layer limits both maps' alpha to that footprint.
+Review preserves the existing layer outside it, rather than replacing padded
+context pixels. Chord still processes the rectangular crop for context.
+Normal data is estimated, not currently a separate paint channel. Erasing albedo
+hides its normal detail. Commit to Base now uses a native Cycles **tangent-space
+normal bake** (+X/+Y/+Z, OpenGL convention), alongside the albedo bake, with one
+undo. Neutral detail stays approximately RGB (0.5, 0.5, 1), even on curved meshes.
+New detail is oriented around the existing composed normal rather than replacing
+the base shading. The UV base is read through a tangent-space Normal Map node.
+Layer Details exposes the UV tangent normal image for saving, replacing or clearing;
+use Non-Color. Earlier object-space bakes are not tangent maps: clear/replace those
+before continuing, or rebake from retained source layers without the old normal base.
+Chord can exaggerate broad forms already present in the mesh at full strength;
+the purpose of this slice is to try that behavior in the real workflow.
+
+Selected inpainting also **matches Chord albedo to the existing texture** before
+review. A fresh emission capture projects the current target-slot stack without
+lights, World tint or normal shading. Matching uses a narrow unchanged band just
+outside the feathered edit footprint, inside the context crop; unrelated surfaces
+and untouched initial gray base are excluded. Properly weighted LAB statistics
+correct brightness/color, with limited contrast gains and outlier rejection.
+Only editable RGB changes; original alpha, normals and outside pixels are retained.
+No extra Chord inference is needed, but submission includes one extra reference
+render. Full-frame generation or insufficient established boundary texture skips
+matching. This helps color seams, not geometric/normal discontinuities or every
+spatially varying Chord artifact.
 
 One request runs at a time. Stay on the originating object/slot/layer and keep its
 viewport open; orbiting to inspect is fine. Switching scene, target or selection,
@@ -391,6 +453,9 @@ python3 tools/selection_event_test.py
 python3 tools/result_apply_probe.py
 python3 tools/backend_test.py
 python3 tools/generation_test.py --capture-only
+# Deterministic single/batch review, editor switching and Image Editor Apply
+# with native undo/redo, without ComfyUI:
+python3 tools/generation_test.py --review-only
 # Requires the live local server and EpicRealismXL checkpoint:
 python3 tools/generation_test.py
 # Same live workflow with geometry depth, aligned-map assertions and preview:

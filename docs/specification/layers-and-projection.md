@@ -13,10 +13,13 @@
 
 ## Base and working display
 
-The actual base is UV-mapped baked color, independent of a viewpoint. It displays
-**unlit**, as do all projection layers: generated shadows and highlights must not
-receive scene lighting a second time. The base is not directly editable through
-viewpoint-layer tools.
+The actual base is UV-mapped baked albedo, independent of a viewpoint. The base
+and projection composite display through a diffuse-only Principled shader under
+scene lighting (metallic 0, roughness 1, specular IOR level 0). This supersedes the
+earlier unlit-stack decision: generation-time Chord albedo estimation
+removes measured diffuse lighting before storing generated pixels. The base is
+not directly editable through viewpoint-layer tools. Commit bakes still use an
+emission-only material copy so they store albedo rather than scene illumination.
 
 Composite visible projections from bottom to top using image alpha over the base.
 Lower-layer changes show dynamically through transparent regions. Opaque pixels
@@ -36,6 +39,36 @@ common bootstrap is a first ordinary projection generated with guidance.
 The 0.2.0 prototype uses a fixed opaque gray generated image and a new material,
 retaining the previous material by reference. This is a test bootstrap, not a
 decision on final base-creation controls.
+
+## Surface-relative normal channel
+
+Generated layers retain Chord's normal image alongside albedo at full strength
+1.0. Its red/right, green/down, blue/toward-viewer vectors are interpreted as
+surface-relative detail: saved-camera right is projected onto the lower composed
+normal's tangent plane, with a stable fallback at a degenerate projection.
+Decoded vectors are transformed into world space, blended bottom to top, and
+normalized. Mirror folding reflects both the basis surface and resulting vector.
+
+Normal coverage uses the lesser of normal and albedo alpha, multiplied by the
+same projection visibility and layer visibility as albedo. Erasing albedo thus
+hides the corresponding normal contribution. Normal images are packed float
+Non-Color datablocks with Channel Packed alpha; normal painting is not exposed.
+Apply replaces a selection-limited normal snapshot together with the native
+albedo dab in one undo step. Layer limits both maps' alpha to the selected/feathered
+footprint; review preserves the existing layer outside that footprint.
+
+Commit Through Selected additionally bakes the composed normal into a separate
+tangent-space UV base image when normals are present. A native Cycles NORMAL bake
+uses the saved UV tangent basis with +X/+Y/+Z (OpenGL) encoding; a neutral map is
+approximately (0.5, 0.5, 1), even on curved geometry. Mesh geometry establishes
+the conversion basis, not baked broad-shape detail. The working shader reads that
+base through a tangent-space Normal Map node, and neutral layers preserve lower
+normal detail. Normal textures extend their RGB at the saved-frame border to
+avoid interpolation toward black; the existing coverage/alpha gates still bound
+their visibility. Prior object-space prototype maps must be cleared/replaced or
+rebaked from retained source layers without the old normal base; no migration is
+added. Chord may infer broad forms
+already represented by geometry, so full-strength detail can exaggerate them.
 
 ## Projection layers
 
@@ -160,7 +193,13 @@ to restore that state.
 **Open:** bake sampling/margin controls and the exact controls for choosing
 the group.
 
-## Derived PBR material
+## Derived PBR material (superseded final-estimation workflow)
+
+The final **Estimate Albedo & Normal** command described below has been removed.
+Every generation now receives a Chord albedo pass before review/application;
+the diffuse-lit working material and emission commit bakes already store albedo.
+Existing derived-material viewing helpers remain. The following records the
+earlier implementation, not a requirement to run a second albedo pass.
 
 The stack's baked-lighting composite stays the inpainting work surface; a
 **separate derived PBR material** previews the result and supports retouching

@@ -77,9 +77,87 @@ isolate the target simply because other surfaces are not editable.
 
 Earlier proposals to capture only layers through the active one are superseded.
 Earlier suggestions to strip lighting from generation context were rejected.
-The subsequent unlit-stack decision means baked lighting remains in stack images
-without being shaded twice; surrounding ordinary materials can still be shaded
-in the scene render. PBR lighting removal belongs to a separate future workflow.
+The earlier unlit-stack and shading-reference division decisions are superseded:
+context stays lit, each generated image passes through Chord albedo estimation
+before storage, and the working stack displays albedo under scene lighting.
+
+### Per-generation albedo estimation
+
+Every SDXL/ZIT result runs through tiled Chord (1024², 128px overlap) before
+review. The full returned context crop is processed, preserving its size; the
+original alpha and selection-limited placement are retained client-side.
+Albedo and normals are retained as paired layer images. Normals use the approved
+surface-relative interpretation at fixed strength **1.0**: Chord RGB decodes to
+right/down/toward, with saved-camera right projected onto the lower composed normal's
+plane. The resulting world-space vector is composed in layer order and normalized,
+using saved visibility and the minimum of normal coverage and albedo alpha.
+Mirror folding reflects vectors back into the displayed half. Packed float
+Non-Color normal images use Channel Packed alpha, keeping vector RGB independent
+of coverage in both Cycles and Eevee. Ordinary painting remains albedo-only;
+erasing albedo also hides the associated normal detail.
+No shading snapshots are captured or recaptured, and no RGB reference division
+or old-reference validation remains. Missing Chord fails before generation.
+The final UV **Estimate Albedo & Normal** command is removed.
+
+#### Post-Chord boundary albedo matching
+
+For selected generation, capture the current target-slot stack in the saved view
+through temporary emission/holdout materials at submission. RGB is unlit albedo;
+reference alpha expresses trusted existing texture coverage. Other surfaces still
+occlude but contribute no matching samples. Initial-gray base texels are excluded;
+explicit painted-layer coverage is trusted even if gray. No persistent shading
+snapshot, scene-lighting division, or second Chord inference is introduced.
+
+After Chord and returned-crop placement, derive the correction from corresponding
+reference/estimated-albedo pixels in an unchanged band outside the entire feathered
+edit footprint and inside the crop. Band width is 2% of the shorter crop dimension,
+bounded to 4–24 saved-frame pixels. Reference coverage squared and result alpha
+weight samples; truly omit excluded samples, reject the most inconsistent 10%,
+and require at least 64 effective samples with total weight 16. Match LAB channel
+means and, where both channel deviations exceed 1, standard deviations with gains
+bounded to 0.5–2. Uniform known colors use mean correction without unstable gains.
+Apply the full correction to editable RGB, then use ordinary footprint compositing
+once; do not double-feather. Alpha, normals, Original review and outside pixels
+are unchanged. Missing/insufficient boundary reference and whole-frame generation
+skip correction. Matching is not a guarantee of normal/geometric seams or removal
+of existing baked lighting. Review and both commit paths use corrected albedo.
+
+Single generations and batches both enter review, initially on **Albedo + Normal**.
+An **Original / Albedo + Normal** debug toggle is shared between viewport and Image
+Editor review controls and persists across candidate/editor switches. Editor
+switches use the same area and do not cancel review. The Image Editor shows pixels
+without render-view exposure/AgX, preserving zoom/pan during version toggles.
+The Image Editor shows albedo; projected normal shading is visible in the viewport.
+**Apply** and **Layer** explicitly commit the paired albedo and normal regardless of the
+debug toggle. Original pixels exist only during review: discard releases both
+versions and ending review releases all originals. Applying from Image Editor
+temporarily uses a valid 3D context for the native clone dab, restores the Image
+Editor with the committed layer, and retains one native image-undo step. Target,
+image-edit, save/load and undo guards remain in effect.
+
+Apply blends normal vectors only within the same selected/feathered footprint as
+the albedo dab; untouched normal texels remain exact. It replaces the normal
+datablock immutably before the native albedo stroke so one native undo/redo restores
+both channels. Review composites each debug version over the existing layer only
+within that footprint. Layer limits both returned maps' alpha to the footprint;
+rectangular context padding is not editable output. Chord still estimates the
+full rectangular crop. Commit Through Selected also bakes normals into a
+packed, Non-Color **tangent-space** UV base (+X/+Y/+Z, OpenGL convention), with paired
+structural undo. The native Cycles NORMAL bake uses the saved UV map and cancels
+the mesh's shading-normal basis rather than encoding mesh curvature as detail.
+A neutral projected map preserves the existing composed normal. The UV base uses
+a tangent-space Normal Map node. Previous object-space base maps must be replaced
+or rebaked from source layers; there is no automatic prototype migration.
+Surface-relative inference can
+exaggerate broad shape already present in the mesh; strength 1.0 is the user's
+chosen trial setting, not a claim of physically accurate reconstruction.
+
+Generation completes for the batch before sequential Chord prompts, reducing
+model swaps. ComfyUI's ModelPatcher handles VRAM offloading; no global unload or
+interrupt is sent. Chord still internally estimates all maps and uses 1024²
+inference even for small inputs. Failures/cancellation never commit a partial
+result. Albedo estimation can change colors/detail and cannot correct geometry
+drift or guarantee seamlessness; workflow latency and memory are part of validation.
 
 ## Selection and context bounds
 
@@ -186,7 +264,7 @@ applying. Native Save/Pack conventions still apply to edited images.
 Saved-frame capture uses a temporary scene with its own camera/render settings,
 no compositor/sequencer/overlays, viewport-visible objects, and viewport modifier
 enable states. All overridden visibility flags are restored. The existing stack
-uses unlit color, while surroundings use scene lighting. Standard/sRGB, exposure 0
+and surroundings use scene lighting. Standard/sRGB, exposure 0
 and gamma 1 avoid baking a display transform into color that will be displayed again;
 the original scene color management is preserved. Material Preview studio lighting
 and render-specific modifier detail levels may differ from this scene render.
