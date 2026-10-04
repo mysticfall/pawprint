@@ -70,8 +70,12 @@ Normal textures extend their RGB at the saved-frame border to
 avoid interpolation toward black; the existing coverage/alpha gates still bound
 their visibility. Prior object-space prototype maps must be cleared/replaced or
 rebaked from retained source layers without the old normal base; no migration is
-added. Chord may infer broad forms
-already represented by geometry, so full-strength detail can exaggerate them.
+added. Chord may infer broad forms already represented by geometry. New generations
+experimentally remove mesh-correlated angular flow at multiple spatial scales
+before review, using a fresh evaluated target-slot smooth-normal capture. Removal
+is full-strength and ungated: unmatched variation is retained by the regression,
+but meaningful relief coincident with mesh flow can also be erased. Existing maps
+are not retroactively corrected; this is not a calibrated Chord normal model.
 
 ## Projection layers
 

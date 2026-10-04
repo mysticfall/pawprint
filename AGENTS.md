@@ -124,8 +124,11 @@ bakes a tangent-space normal UV map via native Cycles NORMAL (+X/+Y/+Z, OpenGL).
 The base uses a tangent-space Normal Map node; generated estimates use the mesh
 shading normal as their basis and replace lower detail at opaque coverage,
 blending normalized vectors at feathered edges. Transparent coverage preserves
-lower detail; opaque neutral estimates clear it. Geometry-aware compensation is
-deferred, with preservation favored over uncertain mesh-flow removal if resumed. Mesh curvature is
+lower detail; opaque neutral estimates clear it. New generations experimentally
+remove mesh-correlated angular flow through ungated full-strength multiscale
+regression against a fresh evaluated target-slot smooth-normal capture. This
+user-authorized aggressive trial can also erase mesh-correlated relief; existing
+maps are not rewritten and general detail preservation is not established. Mesh curvature is
 not baked as detail. Prior object-space prototype bases require manual replacement
 or rebaking from retained sources, not migration. Normal painting is not yet exposed.
 Merge down and composite
@@ -148,12 +151,14 @@ Existing single-projection data migrates on load/reload.
 - `pawprint/backend.py`: SDXL parameter/capability contract and bpy-free HTTP worker.
 - `pawprint/capture.py`: shared saved-frame render, scoped context/crop and returned patch placement.
 - `pawprint/colormatch.py`: bpy-free, weighted boundary LAB matching against fresh unlit stack albedo.
+- `pawprint/normalmatch.py`: bpy-free experimental multiscale angular mesh-flow removal before candidate review.
 - `pawprint/result.py`: native clone result application and paint-setting restoration.
 - `pawprint/generation.py`: discovery, per-request ownership, async process lifecycle/UI operators.
 - `pawprint/baking.py`: slot-isolated Cycles emission bake and commit-through-selected operator.
 - `pawprint/pbr.py`: derived PBR material helpers and existing-material view-mode slot swap; final estimate command removed.
 - `tools/backend_test.py`: fake-server errors, capabilities and owned cancellation checks.
 - `tools/colormatch_test.py`: boundary statistics, colour shifts and exact alpha/outside preservation.
+- `tools/normalmatch_test.py`: mesh-flow removal, unmatched detail, exact coverage preservation and coincident-relief limitation.
 - `tools/albedo_reference_test.py`: isolated emission reference, trusted coverage, occlusion and failure cleanup.
 - `tools/generation_test.py`: live shipped-operator capture/apply/undo and stale-target checks.
 - `tools/baking_test.py`: isolated UV commit bake, one-step undo/redo, interleave and persistence checks.

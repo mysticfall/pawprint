@@ -42,6 +42,35 @@ def main():
         assert not len(cube.data.materials)
         assert np.array_equal(ext.capture.pixels(layer.image), before)
         assert counts == (len(bpy.data.materials), len(bpy.data.scenes), len(bpy.data.images))
+        # Mesh orientation and the saved camera both matter; existing texture
+        # detail must not enter this geometry-only reference.
+        old_view, old_projection = tuple(layer.view_matrix), tuple(layer.projection)
+        old_camera = scene.camera.matrix_world.copy()
+        obj.rotation_euler.y = .3
+        scene.camera.rotation_euler.y = .2
+        bpy.context.view_layer.update()
+        view = scene.camera.matrix_world.inverted()
+        window = scene.camera.calc_matrix_camera(bpy.context.evaluated_depsgraph_get(), x=128, y=128)
+        layer.view_matrix = ext.projection.flattened(view)
+        layer.projection = ext.projection.flattened(window @ view)
+        rotated = ext.capture.mesh_normals(bpy.context, layer, directory)
+        assert rotated[64, 40, 3] > .99
+        # Eevee's intermediate shader buffers have half-float precision even
+        # when the final EXR is 32-bit.
+        np.testing.assert_allclose(rotated[64, 40, :3], (np.sin(.1), 0, np.cos(.1)),
+                                   atol=1e-3 if '--eevee' in sys.argv else 1e-5)
+        obj.rotation_euler.y = 0
+        scene.camera.matrix_world = old_camera
+        layer.view_matrix, layer.projection = old_view, old_projection
+        bpy.context.view_layer.update()
+        normal = ext.capture.mesh_normals(bpy.context, layer, directory)
+        np.testing.assert_allclose(normal[64, 40, :3], (0, 0, 1), atol=1e-5)
+        assert normal[64, 40, 3] > .99
+        assert normal[64, 100, 3] == 0, 'Other slot/occluder contributed normal samples'
+        assert [(slot.link, slot.material) for slot in obj.material_slots] == materials
+        assert not len(cube.data.materials)
+        assert np.array_equal(ext.capture.pixels(layer.image), before)
+        assert counts == (len(bpy.data.materials), len(bpy.data.scenes), len(bpy.data.images))
         # Changed lighting cannot affect the reference.
         background.inputs['Strength'].default_value = .01
         again = ext.capture.albedo_reference(bpy.context, layer, directory)
@@ -67,6 +96,11 @@ def main():
             try:
                 ext.capture.albedo_reference(bpy.context, layer, directory)
                 raise AssertionError('Expected reference capture failure')
+            except RuntimeError as exc:
+                assert 'Injected' in str(exc)
+            try:
+                ext.capture.mesh_normals(bpy.context, layer, directory)
+                raise AssertionError('Expected normal reference capture failure')
             except RuntimeError as exc:
                 assert 'Injected' in str(exc)
         finally:

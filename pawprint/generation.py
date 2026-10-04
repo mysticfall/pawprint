@@ -11,7 +11,7 @@ import tempfile
 import bpy
 import numpy as np
 
-from . import backend, capture, colormatch, model, painting, result
+from . import backend, capture, colormatch, model, normalmatch, painting, result
 
 _job = None
 _retired = []
@@ -260,7 +260,7 @@ def _begin_review(context, job, seeds):
         normal = capture.returned_pixels(path.with_name(path.name.replace('result', 'normal', 1)),
                                          frame, job['metadata'], non_color=True)
         normal[:, :, 3] = original[:, :, 3]
-        normal_candidates.append(normal)
+        normal_candidates.append(normalmatch.match(normal, job['metadata']))
     _ensure_layer_display(layer)
     _review = dict(window=job['window'], area=job['area'], scene=job['scene'], view_layer=job['view_layer'],
                    owner=job['owner'], material=stack.id_data, material_ptr=job['material'], slot=job['slot'],
@@ -534,6 +534,7 @@ class PAWPRINT_OT_generate(bpy.types.Operator):
             record_prompt(context.scene.pawprint_negative_history, settings['negative'])
             directory = Path(tempfile.mkdtemp(prefix='pawprint-job-'))
             metadata = capture.prepare(context, layer, directory, settings['resolution'])
+            metadata['mesh_normals'] = capture.mesh_normals(context, layer, directory)
             # Depth guidance is adapter-independent; the worker uploads the
             # freshly written depth.png for whichever graph consumes it.
             if settings['depth_enabled']:

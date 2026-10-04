@@ -259,7 +259,11 @@ materials are not baked into the initial gray base.
       model output with Chord albedo and normal shading. **Viewport / Image Editor**
       switches the same area without ending review or resetting the comparison.
       The Image Editor shows image pixels without AgX/exposure; version toggles
-      preserve zoom/pan. Review starts on **Albedo + Normal** after Chord processing.
+       preserve zoom/pan. Review starts on **Albedo + Normal** after Chord processing.
+       New normal estimates undergo experimental full-strength mesh-flow removal
+       using a fresh saved-view smooth-normal capture. This reduces duplicated
+       curvature but can also erase relief that follows the mesh. Existing maps
+       are unchanged; generate a fresh result to test the correction.
     11. Set **Batch** above one (no fixed upper limit — the slider suggests up to
         eight but any count can be typed) to generate that many random-seed
       candidates instead. Each candidate gets its own server request; uploads are
@@ -452,6 +456,9 @@ python3 tools/selection_test.py
 python3 tools/selection_event_test.py
 python3 tools/result_apply_probe.py
 python3 tools/backend_test.py
+python3 tools/normalmatch_test.py
+# Isolated albedo/mesh-normal reference capture and cleanup:
+blender --background --factory-startup --python-exit-code 1 --python tools/albedo_reference_test.py
 python3 tools/generation_test.py --capture-only
 # Deterministic single/batch review, editor switching and Image Editor Apply
 # with native undo/redo, without ComfyUI:

@@ -12,7 +12,7 @@ def pixels(image):
     return values.reshape(image.size[1], image.size[0], 4)
 
 
-def render_frame(context, layer, path, material_override=None, transparent=False, scene_linear=False):
+def render_frame(context, layer, path, material_override=None, transparent=False, scene_linear=False, data_pass=False):
     """Return saved-frame RGBA, restoring all temporary scene/render state."""
     width, height = layer.image.size
     scene = context.scene
@@ -70,6 +70,10 @@ def render_frame(context, layer, path, material_override=None, transparent=False
         render.use_compositing = render.use_sequencer = False
         render.use_multiview = False
         render.film_transparent = transparent
+        if data_pass:
+            # Denoising/data dithering must not invent directional normal detail.
+            temporary.cycles.use_denoising = False
+            render.dither_intensity = 0
         render.image_settings.file_format = 'OPEN_EXR' if scene_linear else 'PNG'
         render.image_settings.color_mode = 'RGBA'
         render.image_settings.color_depth = '32' if scene_linear else '8'
@@ -107,13 +111,28 @@ def render_frame(context, layer, path, material_override=None, transparent=False
         context.view_layer.update()
 
 
-def albedo_reference(context, layer, directory):
-    """Unlit target-slot composite; other surfaces remain occluding holdouts."""
+def _slot_reference(context, layer, directory, *, mesh_normals=False):
+    """Target-slot emission; other surfaces remain occluding holdouts."""
     material = layer.id_data.copy()
     holdout = bpy.data.materials.new('Pawprint temporary reference holdout')
     slots, added = [], []
     try:
-        projection.build_material(material, emission=True, albedo_reference=True)
+        if mesh_normals:
+            material.use_nodes = True
+            tree = material.node_tree
+            tree.nodes.clear()
+            output = tree.nodes.new('ShaderNodeOutputMaterial')
+            geometry = tree.nodes.new('ShaderNodeNewGeometry')
+            encode = tree.nodes.new('ShaderNodeVectorMath')
+            encode.operation = 'MULTIPLY_ADD'
+            tree.links.new(geometry.outputs['Normal'], encode.inputs[0])
+            encode.inputs[1].default_value = (.5, .5, .5)
+            encode.inputs[2].default_value = (.5, .5, .5)
+            emission = tree.nodes.new('ShaderNodeEmission')
+            tree.links.new(encode.outputs['Vector'], emission.inputs['Color'])
+            tree.links.new(emission.outputs[0], output.inputs['Surface'])
+        else:
+            projection.build_material(material, emission=True, albedo_reference=True)
         holdout.use_nodes = True
         tree = holdout.node_tree
         tree.nodes.clear()
@@ -133,7 +152,9 @@ def albedo_reference(context, layer, directory):
                 slot.link = 'OBJECT'
                 slot.material = holdout
         context.object.material_slots[context.object.active_material_index].material = material
-        return render_frame(context, layer, directory / 'albedo-reference.png', transparent=True)
+        path = directory / ('mesh-normals.exr' if mesh_normals else 'albedo-reference.png')
+        return render_frame(context, layer, path, transparent=True, scene_linear=mesh_normals,
+                            data_pass=mesh_normals)
     finally:
         for slot, link, original in reversed(slots):
             slot.material = original
@@ -143,6 +164,20 @@ def albedo_reference(context, layer, directory):
         bpy.data.materials.remove(material)
         bpy.data.materials.remove(holdout)
         context.view_layer.update()
+
+
+def albedo_reference(context, layer, directory):
+    """Unlit target-slot composite; other surfaces remain occluding holdouts."""
+    return _slot_reference(context, layer, directory)
+
+
+def mesh_normals(context, layer, directory):
+    """Fresh evaluated smooth normals, with no existing texture normal detail."""
+    reference = _slot_reference(context, layer, directory, mesh_normals=True)
+    rotation = np.asarray(projection.matrix(layer.view_matrix).to_3x3())
+    reference[..., :3] = (reference[..., :3] * 2 - 1) @ rotation.T
+    reference[..., :3] *= (1, -1, 1)  # Saved camera right/down/toward.
+    return reference
 
 
 def prepare(context, layer, directory, long_edge):

@@ -1,6 +1,42 @@
 # Scope and validation
 
-## Current slice: replacement normal composition
+## Current slice: experimental aggressive mesh-flow removal
+
+New generations capture evaluated smooth mesh normals from the saved view,
+isolating the active target slot with occluding holdouts. Capture follows viewport
+modifier/subdivision settings and excludes texture normal detail. After Chord
+crop placement, camera right/down/toward angular normal fields are split into
+spatial Gaussian bands (2/8/32/128 pixels at a 1024px saved-frame long edge).
+Independent per-axis least-squares fits remove the mesh-correlated field at full
+strength, with no confidence gates, gain clamps or protected fine band. Alpha,
+unselected and occluded pixels remain unchanged; feathered pixels are corrected
+using the fit from opaque editable interior. No interior means no correction.
+Both adapters and every batch candidate use the same correction before review;
+Original remains unchanged. Previously generated/committed maps are not rewritten.
+
+This deliberately aggressive strategy supersedes the conservative deferral below
+for a user-authorized production trial. It is not calibrated perspective-normal
+recovery: meaningful relief correlated with mesh flow can also disappear. The
+isolated real-face trial reduced median inferred tilt from 17.3° to 6.4° and looked
+promising under three controlled light directions. Synthetic unmatched fine/broad
+detail largely survived, while exactly mesh-coincident relief was removed. FFT
+smoothing still has periodic boundaries; arbitrary views, silhouettes, mirrored
+layers and full scene lighting need interactive validation. No general detail
+preservation guarantee is claimed.
+
+Production-path validation captures the copied real scene afresh and reduces
+median tilt from 17.28° to 6.35°, preserving alpha and unselected pixels exactly.
+Pure numerical checks cover mesh-only removal, unmatched fine/broad detail,
+flat mesh, feather/occlusion preservation, missing interior and the intentional
+coincident-relief failure. Factory Blender checks cover isolated reference
+cleanup/occlusion, saved-camera axes, replacement composition/bake persistence
+and UI candidate review/Apply/Layer native undo. Live ComfyUI generation and
+interactive appearance after reload were initially left for the user's test.
+The user subsequently confirmed that the production correction works well in
+the live scene and approved committing this experimental strategy. This confirms
+the tested scene's appearance, not general detail preservation across all meshes.
+
+## Previous slice: replacement normal composition
 
 Generated normals now follow albedo's replacement semantics. Each estimate uses
 the evaluated mesh shading normal as its saved-camera tangent basis, not the
@@ -9,8 +45,8 @@ coverage preserves it, and feathered coverage blends normalized vectors. This
 fixes compounding across overlapping layers and committed bases; it does not
 correct already committed exaggerated normals or calibrate Chord's broad forms.
 
-The user confirmed the replacement fix works well in the live scene and deferred
-geometry-aware extraction. No compensation is integrated. If resumed, remove only mesh
+The user confirmed the replacement fix works well in the live scene and initially deferred
+geometry-aware extraction. The conservative proposal was to remove only mesh
 flow supported by strong evidence, prioritize fine and unmatched broad detail,
 and prefer leaving geometry influence over deleting meaningful detail. The first
 local-confidence prototype failed preservation checks and is not integrated.

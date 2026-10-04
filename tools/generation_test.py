@@ -40,7 +40,7 @@ def worker():
                 layer = ext.model.active_layer(ext.model.active_stack(bpy.context))
                 def pixels():
                     return np.array(bpy.data.images[name].pixels[:])
-                def fixture_review(count=1, alpha=1, matching=False):
+                def fixture_review(count=1, alpha=1, matching=False, normal_matching=False):
                     # Exercise completion via tick, with deterministic PNGs and
                     # an already-exited worker: no server or GPU job required.
                     stack = ext.model.active_stack(bpy.context)
@@ -58,6 +58,10 @@ def worker():
                         reference = np.ones((height, width, 4), dtype=np.float32)
                         reference[:, :, :3] = (.25, .45, .65)
                         metadata['albedo_reference'] = reference
+                    if normal_matching:
+                        reference = np.ones((height, width, 4), dtype=np.float32)
+                        reference[..., :3] = (0, .6, .8)
+                        metadata['mesh_normals'] = reference
                     for index in range(count):
                         rgba = np.ones((height, width, 4), dtype=np.float32)
                         rgba[:, :, :3] = (.3 + index * .1, .5, .7)
@@ -120,6 +124,11 @@ def worker():
                                                        ((.3 + index * .1) * .5, .25, .35), atol=1 / 255)
                         assert np.array_equal(ext.capture.pixels(layer.image), before_repair)
                         ext.generation.end_review('Boundary matching verified')
+                        normal_review = fixture_review(normal_matching=True)
+                        np.testing.assert_allclose(normal_review['normals'][0][64, 64, :3],
+                                                   (.5, .5, 1), atol=1 / 255)
+                        assert normal_review['normals'][0][64, 64, 3] == 1
+                        ext.generation.end_review('Mesh normal matching verified')
                         layer.selection_paths = '[]'
                         state['before'] = pixels()
                         bpy.ops.ed.undo_push(message='Before single review')
