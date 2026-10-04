@@ -323,7 +323,10 @@ def build_material(material, emission=False, normal_bake=False, albedo_reference
         if not emission or normal_bake:
             from . import normals
             estimated, normal_texture = normals.surface_nodes(
-                tree, stack, coordinates.outputs[0], normal, fold,
+                # A generated estimate replaces lower texture detail, rather
+                # than rotating it again. Only mesh geometry defines its basis;
+                # the lower composed normal is used by the coverage blend below.
+                tree, stack, coordinates.outputs[0], geometry.outputs['Normal'], fold,
                 axis_node.outputs[0] if fold is not None else None)
             normal_mix = node('ShaderNodeMixRGB', 'Normal Over Base', 1000, -700)
             normal_texture['pawprint_layer'] = stack.path_from_id()

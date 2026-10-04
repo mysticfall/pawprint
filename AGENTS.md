@@ -121,8 +121,11 @@ Layer retains both returned maps with selection-limited alpha; review preserves
 the existing layer outside the selected/feathered footprint. Context capture uses
 viewport subdivision levels, not render-only levels. Commit to Base additionally
 bakes a tangent-space normal UV map via native Cycles NORMAL (+X/+Y/+Z, OpenGL).
-The base uses a tangent-space Normal Map node; new detail reorients around the
-lower composed normal, preserving it for neutral estimates. Mesh curvature is
+The base uses a tangent-space Normal Map node; generated estimates use the mesh
+shading normal as their basis and replace lower detail at opaque coverage,
+blending normalized vectors at feathered edges. Transparent coverage preserves
+lower detail; opaque neutral estimates clear it. Geometry-aware compensation is
+deferred, with preservation favored over uncertain mesh-flow removal if resumed. Mesh curvature is
 not baked as detail. Prior object-space prototype bases require manual replacement
 or rebaking from retained sources, not migration. Normal painting is not yet exposed.
 Merge down and composite

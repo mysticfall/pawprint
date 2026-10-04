@@ -88,8 +88,9 @@ review. The full returned context crop is processed, preserving its size; the
 original alpha and selection-limited placement are retained client-side.
 Albedo and normals are retained as paired layer images. Normals use the approved
 surface-relative interpretation at fixed strength **1.0**: Chord RGB decodes to
-right/down/toward, with saved-camera right projected onto the lower composed normal's
-plane. The resulting world-space vector is composed in layer order and normalized,
+right/down/toward, with saved-camera right projected onto the mesh shading normal's
+plane. The resulting world-space vector replaces lower texture normals at opaque
+coverage and blends at feathered edges, rather than adding detail again,
 using saved visibility and the minimum of normal coverage and albedo alpha.
 Mirror folding reflects vectors back into the displayed half. Packed float
 Non-Color normal images use Channel Packed alpha, keeping vector RGB independent
@@ -145,7 +146,8 @@ full rectangular crop. Commit Through Selected also bakes normals into a
 packed, Non-Color **tangent-space** UV base (+X/+Y/+Z, OpenGL convention), with paired
 structural undo. The native Cycles NORMAL bake uses the saved UV map and cancels
 the mesh's shading-normal basis rather than encoding mesh curvature as detail.
-A neutral projected map preserves the existing composed normal. The UV base uses
+An opaque neutral projected map replaces lower detail with the mesh normal;
+transparent coverage preserves the existing composed normal. The UV base uses
 a tangent-space Normal Map node. Previous object-space base maps must be replaced
 or rebaked from source layers; there is no automatic prototype migration.
 Surface-relative inference can

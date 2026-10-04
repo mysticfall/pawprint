@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Surface-relative Chord normals: packed images and normalized vector composition."""
+"""Mesh-relative Chord normals: packed images and normalized vector replacement."""
 import bpy
 import numpy as np
 
@@ -39,6 +39,7 @@ def surface_nodes(tree, layer, coordinates, surface, fold=None, axis=None):
     """Return a world-space normal and texture node at full strength.
 
     Chord is right/down/toward: negate the bitangent, not the stored green.
+    The surface is the mesh shading normal, never the lower texture composite.
     Evaluate in the kept mirror half, then reflect the resulting vector back.
     """
     def node(kind, name):

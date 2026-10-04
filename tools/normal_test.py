@@ -68,7 +68,19 @@ def main():
         upper.normal = ext.normals.image(upper_values)
         ext.projection.build_material(material, emission=True, normal_bake=True)
         composed = ext.capture.render_frame(bpy.context, layer, directory / 'composed.exr', scene_linear=True)
-        assert np.allclose(composed[64,40,:3]*2-1, unit((.54,-.3,.72)), atol=.015)
+        assert np.allclose(composed[64,40,:3]*2-1, unit((.3,-.3,.8)), atol=.015)
+        # Full coverage replaces lower detail; identical overlapping estimates
+        # are idempotent rather than increasing their tilt at each layer.
+        upper_values[:, :, 3] = 1
+        upper.normal = ext.normals.image(upper_values)
+        ext.projection.build_material(material, emission=True, normal_bake=True)
+        replaced = ext.capture.render_frame(bpy.context, layer, directory / 'replaced.exr', scene_linear=True)
+        assert np.allclose(replaced[64,40,:3]*2-1, unit((0,-.6,.8)), atol=.015)
+        upper_values[:, :, :3] = (.8,.5,.9)
+        upper.normal = ext.normals.image(upper_values)
+        ext.projection.build_material(material, emission=True, normal_bake=True)
+        repeated = ext.capture.render_frame(bpy.context, layer, directory / 'repeated.exr', scene_linear=True)
+        assert np.allclose(repeated[64,40,:3]*2-1, unit((.6,0,.8)), atol=.015)
         stack.layers.remove(1)
         layer = stack.layers[0]
         ext.projection.build_material(material)
@@ -130,16 +142,27 @@ def main():
         'Mesh curvature leaked into tangent normal map', pixels[:, :, :3].min(axis=(0, 1)),
         pixels[:, :, :3].max(axis=(0, 1)))
     assert baked['pawprint_normal_space'] == 'TANGENT'
-    # A neutral new layer must preserve an existing tangent-space detail base.
+    # Opaque neutral replacement clears lower texture detail, while zero normal
+    # coverage preserves it. The replacement also applies over a committed base.
     detail = neutral.copy()
     detail[:, :, :3] = (.7, .5, .5 + np.sqrt(.84) / 2)
     sphere_stack.base_normal = ext.normals.image(detail)
-    with_layer = ext.baking._bake(bpy.context, sphere_stack, 0, 'Preserved Detail Test', normal=True)
+    with_layer = ext.baking._bake(bpy.context, sphere_stack, 0, 'Replaced Detail Test', normal=True)
     without_layer = ext.baking._bake(bpy.context, sphere_stack, -1, 'Base Detail Test', normal=True)
-    assert np.allclose(ext.capture.pixels(with_layer), ext.capture.pixels(without_layer), atol=.015), (
-        'Neutral projection replaced the existing tangent detail')
+    replaced_pixels = ext.capture.pixels(with_layer)[:, :, :3]
+    base_pixels = ext.capture.pixels(without_layer)[:, :, :3]
+    covered = np.max(np.abs(replaced_pixels - base_pixels), axis=2) > .05
+    assert np.count_nonzero(covered) > 100
+    # UV bake filtering includes partially covered boundary texels; require a
+    # neutral opaque interior without mistaking that transition for full coverage.
+    assert np.count_nonzero(np.max(np.abs(replaced_pixels - (.5,.5,1)), axis=2) < .02) > 100
+    assert np.max(np.abs(replaced_pixels - (.5,.5,1))) <= np.max(np.abs(base_pixels - (.5,.5,1))) + .02
     assert np.max(np.abs(ext.capture.pixels(without_layer)[:, :, :3] - detail[:, :, :3])) < .03
-    print('Production normal axes, coverage, mirror, basis, merge, tangent bake, curved neutrality, detail preservation, undo and persistence passed')
+    neutral[:, :, 3] = 0
+    neutral_layer.normal = ext.normals.image(neutral)
+    transparent = ext.baking._bake(bpy.context, sphere_stack, 0, 'Transparent Detail Test', normal=True)
+    assert np.allclose(ext.capture.pixels(transparent), ext.capture.pixels(without_layer), atol=.015)
+    print('Production normal axes, coverage, mirror, basis, replacement, idempotence, merge, tangent bake, curved neutrality, undo and persistence passed')
 
 
 main()

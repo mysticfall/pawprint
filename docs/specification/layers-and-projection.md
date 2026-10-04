@@ -44,10 +44,12 @@ decision on final base-creation controls.
 
 Generated layers retain Chord's normal image alongside albedo at full strength
 1.0. Its red/right, green/down, blue/toward-viewer vectors are interpreted as
-surface-relative detail: saved-camera right is projected onto the lower composed
+mesh-relative estimates: saved-camera right is projected onto the mesh shading
 normal's tangent plane, with a stable fallback at a degenerate projection.
-Decoded vectors are transformed into world space, blended bottom to top, and
-normalized. Mirror folding reflects both the basis surface and resulting vector.
+Decoded vectors are transformed into world space and replace the lower normal
+at opaque coverage; feathered coverage blends normalized vectors bottom to top.
+The lower composed normal never defines the estimate's basis, avoiding repeated
+addition of texture detail. Mirror folding reflects both basis and result.
 
 Normal coverage uses the lesser of normal and albedo alpha, multiplied by the
 same projection visibility and layer visibility as albedo. Erasing albedo thus
@@ -62,8 +64,9 @@ tangent-space UV base image when normals are present. A native Cycles NORMAL bak
 uses the saved UV tangent basis with +X/+Y/+Z (OpenGL) encoding; a neutral map is
 approximately (0.5, 0.5, 1), even on curved geometry. Mesh geometry establishes
 the conversion basis, not baked broad-shape detail. The working shader reads that
-base through a tangent-space Normal Map node, and neutral layers preserve lower
-normal detail. Normal textures extend their RGB at the saved-frame border to
+base through a tangent-space Normal Map node. An opaque neutral estimate replaces
+lower detail with the mesh normal; transparent coverage preserves lower detail.
+Normal textures extend their RGB at the saved-frame border to
 avoid interpolation toward black; the existing coverage/alpha gates still bound
 their visibility. Prior object-space prototype maps must be cleared/replaced or
 rebaked from retained source layers without the old normal base; no migration is

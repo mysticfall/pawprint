@@ -1,6 +1,33 @@
 # Scope and validation
 
-## Current slice: tangent-space normal workflow
+## Current slice: replacement normal composition
+
+Generated normals now follow albedo's replacement semantics. Each estimate uses
+the evaluated mesh shading normal as its saved-camera tangent basis, not the
+lower composed texture normal. Opaque coverage replaces lower detail, zero
+coverage preserves it, and feathered coverage blends normalized vectors. This
+fixes compounding across overlapping layers and committed bases; it does not
+correct already committed exaggerated normals or calibrate Chord's broad forms.
+
+The user confirmed the replacement fix works well in the live scene and deferred
+geometry-aware extraction. No compensation is integrated. If resumed, remove only mesh
+flow supported by strong evidence, prioritize fine and unmatched broad detail,
+and prefer leaving geometry influence over deleting meaningful detail. The first
+local-confidence prototype failed preservation checks and is not integrated.
+
+Blender 5.2.2 factory Cycles and Eevee normal tests pass replacement and identical
+overlap idempotence, fractional coverage, zero coverage over a tangent base,
+saved axes/mirror, UV bake/undo and persistence. Isolated factory UI candidate
+review/Apply/Layer native undo checks also pass. A copied real scene was relit
+under three directions: replacement reduces the additive facial exaggeration,
+but broad Chord form remains. The agent did not reload or alter the live review
+during validation; the user subsequently confirmed the fix's live appearance.
+The conservative follow-up removes at most 15% of strongly matched broad mesh
+flow, preserves fine-detail angular magnitude in its synthetic test, and skips
+unmatched broad/local relief exactly. It also skips the real face as uncertain;
+these are experimental checks, not proof of general calibration or preservation.
+
+## Previous slice: tangent-space normal workflow
 
 The user superseded the object-space UV normal bake: exported normals should
 describe surface detail for external applications, not broad mesh geometry.
@@ -8,8 +35,8 @@ Chord inference/strength remain unchanged; estimation errors are deferred.
 
 - Commit to Base uses a native Cycles NORMAL bake in the saved UV tangent basis,
   +X/+Y/+Z (OpenGL) encoding, rather than emission of object-space normals.
-- The UV base uses a tangent-space Normal Map node. Projected detail is oriented
-  around the lower composed normal, so neutral estimates preserve existing detail.
+- The UV base uses a tangent-space Normal Map node. The original additive
+  orientation around the lower composed normal is superseded by replacement above.
 - Normal RGB extends at frame edges to prevent CLIP interpolation toward black
   from inventing a tilt; existing saved-frame coverage and alpha still gate it.
 - Layer Details exposes the tangent base image. Prior object-space bakes are not
@@ -74,7 +101,7 @@ save/reopen regressions. The user confirmed the brighter live depth preview;
 the exact saved-view export was also inspected through Blender MCP. Live ComfyUI
 generation remains unverified for this slice.
 
-## Current slice: surface-relative normals in the main workflow
+## Previous slice: surface-relative normals in the main workflow
 
 The user chose surface-relative normals at full strength **1.0** and explicitly
 requested integration into the main workflow. Every Chord pass now returns both
