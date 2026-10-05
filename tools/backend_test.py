@@ -278,18 +278,16 @@ class BackendTest(unittest.TestCase):
         self.assertEqual(caps['controlnet_models'], ['sdxl_promax.safetensors'])
         backend.validate(self.settings, caps)
         # Below full denoise the refine pipeline runs: depth patches the
-        # conditioning first, the expanded feather mask gates the inpaint
+        # conditioning first, the once-feathered upload gates the inpaint
         # conditioning of the original pixels, the Fooocus patch joins the
         # model chain, and the split sigma schedule enters at the step the
         # denoise strength skips. Colors re-match against the original input.
         settings = dict(self.settings, feather=12)
         graph = backend.workflow(settings, 'in.png', 'mask.png', 'depth.png', caps=caps)
-        self.assertEqual(graph['26']['class_type'], 'INPAINT_ExpandMask')
-        self.assertEqual(graph['26']['inputs'],
-                         {'mask': ['4', 0], 'grow': 12, 'blur': 20, 'blur_type': 'linear'})
+        self.assertNotIn('26', graph)  # Capture already feathered the mask.
         self.assertEqual(graph['21']['class_type'], 'INPAINT_VAEEncodeInpaintConditioning')
         self.assertEqual(graph['21']['inputs'], {'vae': ['1', 2], 'pixels': ['2', 0],
-                                                 'mask': ['26', 0], 'positive': ['14', 0],
+                                                 'mask': ['4', 0], 'positive': ['14', 0],
                                                  'negative': ['14', 1]})
         self.assertEqual(graph['25']['class_type'], 'SelfAttentionGuidance')
         self.assertEqual(graph['25']['inputs'], {'model': ['1', 0], 'scale': 0.5, 'blur_sigma': 2.0})
@@ -318,7 +316,7 @@ class BackendTest(unittest.TestCase):
         self.assertEqual(graph['41']['inputs'], {'samples': ['49', 1], 'vae': ['1', 2]})
         self.assertEqual(graph['56']['class_type'], 'INPAINT_ColorMatch')
         self.assertEqual(graph['56']['inputs'], {'target': ['41', 0], 'reference': ['2', 0],
-                                                 'exclude_mask': ['26', 0], 'strength': 1.0})
+                                                 'exclude_mask': ['4', 0], 'strength': 1.0})
         self.assertEqual(graph['10']['inputs']['images'], ['56', 0])
         for key in ('5', '6', '9', '11', '27', '33', '42', '43'):
             self.assertNotIn(key, graph)
@@ -326,7 +324,7 @@ class BackendTest(unittest.TestCase):
         self.assertNotIn('InpaintModelConditioning', classes)
         self.assertNotIn('ImageCompositeMasked', classes)
         self.assertNotIn('VAEEncode', classes)
-        # Full denoise: the replace pipeline stabilizes the expanded mask,
+        # Full denoise: the replace pipeline stabilizes the uploaded mask,
         # pre-fills the selection through a MAT inpaint model behind a tight
         # mask, encodes the pre-filled pixels as the latent and ColorMatch
         # reference, and keeps a whole sigma schedule.
@@ -334,9 +332,10 @@ class BackendTest(unittest.TestCase):
         backend.validate(full, caps)
         graph = backend.workflow(full, 'in.png', 'mask.png', 'depth.png', caps=caps)
         self.assertEqual(graph['27']['class_type'], 'INPAINT_StabilizeMask')
-        self.assertEqual(graph['27']['inputs'], {'mask': ['26', 0], 'epsilon': 0.01})
+        self.assertEqual(graph['27']['inputs'], {'mask': ['4', 0], 'epsilon': 0.01})
+        self.assertEqual(graph['33']['class_type'], 'ThresholdMask')
         self.assertEqual(graph['33']['inputs'],
-                         {'mask': ['4', 0], 'grow': 4, 'blur': 0, 'blur_type': 'gaussian'})
+                         {'mask': ['4', 0], 'value': 0.5})
         self.assertEqual(graph['42']['class_type'], 'INPAINT_LoadInpaintModel')
         self.assertEqual(graph['42']['inputs'], {'model_name': 'MAT_Places512_G_fp16.safetensors'})
         self.assertEqual(graph['43']['class_type'], 'INPAINT_InpaintWithModel')
@@ -412,7 +411,6 @@ class BackendTest(unittest.TestCase):
             'ModelSamplingAuraFlow': {},
             'DifferentialDiffusion': {},
             'ZImageFunControlnet': {},
-            'INPAINT_ExpandMask': {},
             'INPAINT_StabilizeMask': {},
             'INPAINT_ColorMatch': {},
             'INPAINT_InpaintWithModel': {},
@@ -472,19 +470,17 @@ class BackendTest(unittest.TestCase):
         # pre-fills the selection, the Fun ControlNet runs in inpaint mode as
         # the context provider, DifferentialDiffusion wraps the chain and the
         # advanced sampling stack ends in a colour match against the pre-fill.
-        self.assertEqual(graph['26']['class_type'], 'INPAINT_ExpandMask')
-        self.assertEqual(graph['26']['inputs'],
-                         {'mask': ['4', 0], 'grow': 12, 'blur': 20, 'blur_type': 'linear'})
+        self.assertNotIn('26', graph)
         self.assertEqual(graph['27']['class_type'], 'INPAINT_StabilizeMask')
-        self.assertEqual(graph['27']['inputs'], {'mask': ['26', 0], 'epsilon': 0.01})
+        self.assertEqual(graph['27']['inputs'], {'mask': ['4', 0], 'epsilon': 0.01})
         self.assertEqual(graph['28']['class_type'], 'ThresholdMask')
-        self.assertEqual(graph['28']['inputs'], {'mask': ['27', 0], 'value': 0.0})
-        self.assertEqual(graph['33']['inputs'], {'mask': ['4', 0], 'grow': 4, 'blur': 0, 'blur_type': 'gaussian'})
+        self.assertEqual(graph['28']['inputs'], {'mask': ['4', 0], 'value': 0.5})
+        self.assertNotIn('33', graph)
         self.assertEqual(graph['42']['class_type'], 'INPAINT_LoadInpaintModel')
         self.assertEqual(graph['42']['inputs']['model_name'], 'MAT_Places512_G_fp16.safetensors')
         self.assertEqual(graph['43']['class_type'], 'INPAINT_InpaintWithModel')
         self.assertEqual(graph['43']['inputs'], {'inpaint_model': ['42', 0], 'image': ['36', 0],
-                                                 'mask': ['33', 0], 'seed': 11})
+                                                 'mask': ['28', 0], 'seed': 11})
         self.assertEqual(graph['44']['class_type'], 'ModelPatchLoader')
         self.assertEqual(graph['44']['inputs']['name'],
                          'Z-Image-Turbo-Fun-Controlnet-Union-2.1-lite-2601-8steps.safetensors')
@@ -548,20 +544,21 @@ class BackendTest(unittest.TestCase):
         refine = dict(zit, loras=[], denoise=0.6)
         backend.validate(refine, caps)
         graph = backend.workflow(refine, 'in.png', 'mask.png', 'depth.png', caps=caps)
-        for key in ('28', '33', '42', '43'):
+        for key in ('27', '33', '42', '43'):
             self.assertNotIn(key, graph)
         self.assertEqual(graph['45']['inputs']['model'], ['30', 0])
         self.assertEqual(graph['45']['inputs']['image'], ['12', 0])
-        self.assertEqual(graph['45']['inputs']['mask'], ['26', 0])
+        self.assertEqual(graph['45']['inputs']['mask'], ['28', 0])
+        self.assertEqual(graph['28']['inputs'], {'mask': ['4', 0], 'value': 0.5})
         self.assertEqual(graph['25']['inputs']['model'], ['45', 0])
         self.assertEqual(graph['46']['inputs']['pixels'], ['36', 0])
-        self.assertEqual(graph['47']['inputs']['mask'], ['26', 0])
+        self.assertEqual(graph['47']['inputs']['mask'], ['4', 0])
         self.assertEqual(graph['52']['inputs']['denoise'], 0.6)
         self.assertEqual(graph['53']['class_type'], 'SplitSigmas')
         self.assertEqual(graph['53']['inputs'], {'sigmas': ['52', 0], 'step': 1})
         self.assertEqual(graph['55']['inputs']['sigmas'], ['53', 1])
         self.assertEqual(graph['56']['inputs']['reference'], ['36', 0])
-        self.assertEqual(graph['56']['inputs']['exclude_mask'], ['26', 0])
+        self.assertEqual(graph['56']['inputs']['exclude_mask'], ['4', 0])
         # Refine selections validate the ControlNet patch like full-denoise ones.
         with self.assertRaisesRegex(ValueError, 'ControlNet patch'):
             backend.validate(dict(refine, zit_controlnet='missing.safetensors'), caps)

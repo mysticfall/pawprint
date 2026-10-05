@@ -131,6 +131,9 @@ Baking renders through Cycles on the CPU for the target slot only. An error
     Enable **Show Context Bounds** to see the green rectangle, including
    feather support and padding. Disconnected islands and off-target areas count
     toward its bounds. With no selection the context is the full frame.
+    Feather is applied once in saved-image pixels. Subtracted holes retain reference
+    context, but very small holes can be consumed by feathering or downscaling;
+    enlarge the excluded area or reduce feather if needed.
 5. Click **Preview Generation Context** to inspect the actual cropped/resized
    input image in the Image Editor. This uses the same saved-view composite capture
    as Generate, including visible upper layers and surrounding objects, without
@@ -456,6 +459,7 @@ python3 tools/selection_test.py
 python3 tools/selection_event_test.py
 python3 tools/result_apply_probe.py
 python3 tools/backend_test.py
+blender --background --factory-startup --python-exit-code 1 --python tools/inpaint_mask_test.py
 python3 tools/normalmatch_test.py
 # Isolated albedo/mesh-normal reference capture and cleanup:
 blender --background --factory-startup --python-exit-code 1 --python tools/albedo_reference_test.py

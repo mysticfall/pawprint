@@ -181,7 +181,12 @@ def mesh_normals(context, layer, directory):
 
 
 def prepare(context, layer, directory, long_edge):
-    """Render lit context and stage aligned input/mask request pixels."""
+    """Stage lit context and the once-feathered, aligned generation mask.
+
+    Feather is measured in saved-image pixels here, before request resizing.
+    Backend workflows must not grow or blur this mask again. Keep the original
+    weights for final placement/native undo, independently of model conditioning.
+    """
     weights = selection.footprint(layer, generation=True).copy()
     bounds = selection.context_bounds(layer)
     if bounds is None or not np.any(weights):

@@ -40,6 +40,24 @@ half-open pixel rectangles; selection coordinates have their origin at image bot
 left. The editing UI exposes preview/data facilities; the isolated generation probe
 now exercises these same bounds and weights through a live crop/request round-trip.
 
+Generation feathers **once**, in saved-image pixels before crop resizing. The
+uploaded mask carries those soft weights; neither adapter grows or blurs it again.
+Sampling and colour matching use that soft mask (stabilized at full denoise),
+while ZIT hides inpaint context only where uploaded coverage is greater than 0.5.
+MAT pre-fill uses the same greater-than-0.5 threshold, without further dilation.
+Final application retains the original saved-image weights independently of these
+model masks, preserving zero-weight pixels and native image undo.
+
+Subtracting holes can retain visible reference landmarks. Feathering still extends
+into holes: a rectangular hole needs to be wider than twice the feather radius in
+each axis to retain a zero-weight interior, and request downscaling can remove tiny
+features. This is not an arbitrary-hole preservation guarantee. Increase the
+excluded area or reduce feather when reference landmarks approach that limit.
+`tools/inpaint_mask_test.py` verifies actual PNG preparation/resizing, disconnected
+selections, protected holes at feather 0/24, and both adapter/mode mask contracts
+in factory Blender with rendering stubbed. Visual generation quality and native
+Apply/undo remain interactive checks; feather does not guarantee colour continuity.
+
 Paint Layer creates a temporary native UV stencil from the hard selection. Both color
 and erase strokes respect it. Delete Selected Pixels (Delete in the painting
 region) uses one constant-strength, constant-falloff native erase dab covering the

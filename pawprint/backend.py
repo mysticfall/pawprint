@@ -158,13 +158,13 @@ REQUIRED = {'CheckpointLoaderSimple', 'LoadImage', 'ImageToMask', 'VAEEncode',
             'PreviewImage', 'SelfAttentionGuidance', 'DifferentialDiffusion',
             'INPAINT_VAEEncodeInpaintConditioning', 'INPAINT_LoadFooocusInpaint',
             'INPAINT_ApplyFooocusInpaint', 'INPAINT_LoadInpaintModel',
-            'INPAINT_InpaintWithModel', 'INPAINT_ExpandMask', 'INPAINT_StabilizeMask',
+            'INPAINT_InpaintWithModel', 'ThresholdMask', 'INPAINT_StabilizeMask',
             'INPAINT_ColorMatch', 'RandomNoise', 'KSamplerSelect', 'BasicScheduler',
             'CFGGuider', 'SplitSigmas', 'SamplerCustomAdvanced'}
 ZIT_REQUIRED = {'UNETLoader', 'CLIPLoader', 'VAELoader', 'CLIPSetLastLayer', 'CLIPTextEncode',
                 'ConditioningZeroOut', 'ModelSamplingAuraFlow', 'VAEEncode',
                 'SetLatentNoiseMask', 'KSampler', 'VAEDecode', 'LoadImage', 'PreviewImage',
-                'DifferentialDiffusion', 'ZImageFunControlnet', 'INPAINT_ExpandMask',
+                'DifferentialDiffusion', 'ZImageFunControlnet',
                 'INPAINT_StabilizeMask', 'INPAINT_ColorMatch', 'INPAINT_LoadInpaintModel',
                 'INPAINT_InpaintWithModel', 'ThresholdMask', 'SplitSigmas', 'RandomNoise',
                 'KSamplerSelect', 'BasicScheduler', 'BasicGuider', 'SamplerCustomAdvanced'}
@@ -367,16 +367,16 @@ def _sdxl_workflow(settings, image, mask, depth=None, reference=None, caps=None)
         # the pixels fed to the VAE outside the selection; patch placement
         # back onto the layer stays client-side.
         full = settings['denoise'] >= 1.0
-        feather = settings.get('feather', 0)
-        graph['26'] = node('INPAINT_ExpandMask', mask=['4', 0], grow=feather,
-                           blur=int(feather * 1.7), blur_type='linear')
-        source = ['26', 0]
+        # capture.prepare already feathers in saved-image pixels and resizes
+        # that footprint with the crop. Never grow/blur it in request pixels.
+        source = ['4', 0]
         pixels = ['2', 0]
         if full:
-            graph['27'] = node('INPAINT_StabilizeMask', mask=['26', 0], epsilon=0.01)
+            graph['27'] = node('INPAINT_StabilizeMask', mask=source, epsilon=0.01)
             source = ['27', 0]
-            graph['33'] = node('INPAINT_ExpandMask', mask=['4', 0], grow=4, blur=0,
-                               blur_type='gaussian')
+            # MAT needs a hard regeneration mask, not a dilation of every
+            # nonzero feather weight (which can consume protected holes).
+            graph['33'] = node('ThresholdMask', mask=['4', 0], value=0.5)
             graph['42'] = node('INPAINT_LoadInpaintModel',
                                model_name=(caps or {}).get('sdxl_inpaint'))
             graph['43'] = node('INPAINT_InpaintWithModel', inpaint_model=['42', 0],
@@ -455,23 +455,21 @@ def _zit_workflow(settings, image, mask, depth=None, caps=None):
         # with a softened sigma schedule. Both paths re-match colors against
         # their reference outside the selection.
         full = settings['denoise'] >= 1.0
-        feather = settings.get('feather', 0)
-        graph['26'] = node('INPAINT_ExpandMask', mask=['4', 0], grow=feather,
-                           blur=int(feather * 1.7), blur_type='linear')
-        noise_mask = exclude = ['26', 0]
-        control_mask = ['26', 0]
+        # The uploaded mask is the once-feathered, crop-resized footprint.
+        # Keep its soft weights for sampling/matching, but hide context only
+        # above half coverage. Thresholding all nonzero weights at full denoise
+        # unnecessarily hid the protected side of the feathered boundary.
+        noise_mask = exclude = ['4', 0]
+        graph['28'] = node('ThresholdMask', mask=['4', 0], value=0.5)
+        control_mask = ['28', 0]
         reference = ['36', 0]
         if full:
-            graph['27'] = node('INPAINT_StabilizeMask', mask=['26', 0], epsilon=0.01)
-            graph['28'] = node('ThresholdMask', mask=['27', 0], value=0.0)
+            graph['27'] = node('INPAINT_StabilizeMask', mask=noise_mask, epsilon=0.01)
             noise_mask = exclude = ['27', 0]
-            control_mask = ['28', 0]
-            graph['33'] = node('INPAINT_ExpandMask', mask=['4', 0], grow=4, blur=0,
-                               blur_type='gaussian')
             graph['42'] = node('INPAINT_LoadInpaintModel',
                                model_name=(caps or {}).get('zit_inpaint'))
             graph['43'] = node('INPAINT_InpaintWithModel', inpaint_model=['42', 0],
-                               image=['36', 0], mask=['33', 0], seed=int(settings['seed']))
+                               image=['36', 0], mask=control_mask, seed=int(settings['seed']))
             reference = ['43', 0]
         graph['44'] = node('ModelPatchLoader', name=settings['zit_controlnet'])
         control_image = None

@@ -46,7 +46,7 @@ Depth guidance uses one union ControlNet (default Xinsir Pro Max
 sdxl_promax.safetensors via SetUnionControlNetType; the apply receives the
 checkpoint VAE). The latent mode is selected only by the existence of a
 selection: selections follow the user's confirmed reference inpaint pipelines —
-the feather-expanded mask (stabilized at full denoise) feeds
+the once-feathered uploaded mask (stabilized at full denoise) feeds
 INPAINT_VAEEncodeInpaintConditioning, SelfAttentionGuidance + DifferentialDiffusion
 + the Fooocus inpaint patch (fooocus_inpaint_head.pth / inpaint_v26.fooocus.patch)
 wrap the model chain, CFGGuider/RandomNoise/KSamplerSelect/BasicScheduler/
@@ -57,6 +57,10 @@ INPAINT_InpaintWithModel behind a tight mask) while lower denoise encodes the
 original pixels and enters the schedule at SplitSigmas step
 round(steps × (1 − denoise)); patch placement stays client-side.
 No selection uses plain VAEEncode + SetLatentNoiseMask whole-frame img2img.
+Both adapters consume the saved-image feather resized with the crop, without
+backend dilation/blur. ZIT context and MAT pre-fill use a separate >0.5 mask;
+soft sampling/matching and original final-placement weights remain separate.
+Small holes can still be consumed by the client feather or request downscaling.
 A per-layer ordered LoRA stack with per-entry strength chains through
 LoraLoaderModelOnly for both adapters; ZIT's former single style-LoRA field is
 removed. A second adapter family is selectable per layer via Model type: Z Image Turbo
@@ -157,6 +161,8 @@ Existing single-projection data migrates on load/reload.
 - `pawprint/baking.py`: slot-isolated Cycles emission bake and commit-through-selected operator.
 - `pawprint/pbr.py`: derived PBR material helpers and existing-material view-mode slot swap; final estimate command removed.
 - `tools/backend_test.py`: fake-server errors, capabilities and owned cancellation checks.
+- `tools/inpaint_mask_test.py`: factory capture/PNG resizing with stubbed renders,
+  protected holes, disconnected selections, feather 0/24 and both adapter/mode masks.
 - `tools/colormatch_test.py`: boundary statistics, colour shifts and exact alpha/outside preservation.
 - `tools/normalmatch_test.py`: mesh-flow removal, unmatched detail, exact coverage preservation and coincident-relief limitation.
 - `tools/albedo_reference_test.py`: isolated emission reference, trusted coverage, occlusion and failure cleanup.

@@ -279,17 +279,16 @@ from the ImpactPack inpaint nodes instead of repaint ControlNets or
   (`fooocus_inpaint_head.pth` + `inpaint_v26.fooocus.patch` from
   `INPAINT_LoadFooocusInpaint`). The patched model feeds both the guider and
   the scheduler.
-- **Replace (denoise 1.0)**: the uploaded hard mask is expanded by the layer's
-  feather (`INPAINT_ExpandMask`, grow = feather, linear blur ≈ 1.7×, as with
-  ZIT) and stabilized (`INPAINT_StabilizeMask`, epsilon 0.01). A tight
-  secondary mask (grow 4, no blur) drives a dedicated MAT inpaint model
+- **Replace (denoise 1.0)**: the uploaded mask already contains the once-feathered
+  saved-image footprint and is stabilized (`INPAINT_StabilizeMask`, epsilon 0.01).
+  A hard secondary mask (`ThresholdMask`, value 0.5, no extra growth) drives a dedicated MAT inpaint model
   (`INPAINT_LoadInpaintModel` auto-picked from the server list +
   `INPAINT_InpaintWithModel`) that pre-fills the selection;
   `INPAINT_VAEEncodeInpaintConditioning` then encodes the **pre-filled**
   pixels under the stabilized mask, and `BasicScheduler` runs its whole sigma
   schedule.
 - **Refine (denoise < 1.0)**: no stabilization and no pre-fill — the inpaint
-  conditioning encodes the **original** pixels under the expanded feather
+  conditioning encodes the **original** pixels under the uploaded feather
   mask, and `SplitSigmas` cuts the schedule at step `round(steps × (1 −
   denoise))` so sampling enters exactly where the denoise strength skips (the
   reference: 35 steps, step 14, denoise 0.6).
@@ -325,7 +324,7 @@ before the guidance wrappers, so all three compose. Every
 Discovery adds the full node stack (`SelfAttentionGuidance`,
 `DifferentialDiffusion`, `INPAINT_VAEEncodeInpaintConditioning`,
 `INPAINT_LoadFooocusInpaint`, `INPAINT_ApplyFooocusInpaint`,
-`INPAINT_LoadInpaintModel`, `INPAINT_InpaintWithModel`, `INPAINT_ExpandMask`,
+`INPAINT_LoadInpaintModel`, `INPAINT_InpaintWithModel`, `ThresholdMask`,
 `INPAINT_StabilizeMask`, `INPAINT_ColorMatch`, `RandomNoise`,
 `KSamplerSelect`, `BasicScheduler`, `CFGGuider`, `SplitSigmas`,
 `SamplerCustomAdvanced`) to the SDXL required set and reports
@@ -390,11 +389,11 @@ choices (no code reused):
   plain `CLIPTextEncode` positive and a `ConditioningZeroOut` negative — turbo
   samples at CFG 1, so the negative prompt field has no effect for ZIT.
 - **Selections use the reference inpainting pipeline.** A selection runs a
-  dual-path workflow modelled on the user's known-working reference: the uploaded
-   mask is expanded (`INPAINT_ExpandMask`, grow = the layer's feather value, linear
-   blur) into the generation mask. The Fun ControlNet patch runs in inpaint mode
-   (`ZImageFunControlnet` with `inpaint_image` + the mask — binarised at full
-   denoise, the expanded feather mask below — and an optional depth image) at
+   dual-path workflow modelled on the user's known-working reference: the uploaded
+    mask already contains the once-feathered saved-image footprint, resized with
+    the context crop. The Fun ControlNet patch runs in inpaint mode
+    (`ZImageFunControlnet` with `inpaint_image` + a `ThresholdMask` at 0.5
+    at both denoise modes, and an optional depth image) at
    every denoise, so context, depth guidance and Control strength stay effective
    during refinement. At denoise 1.0 the region is additionally pre-filled by
    a dedicated MAT inpaint model (`INPAINT_LoadInpaintModel` +
@@ -405,7 +404,7 @@ choices (no code reused):
    Both paths wrap the model in `DifferentialDiffusion`, sample through the
   advanced stack (`RandomNoise`/`KSamplerSelect`/`BasicScheduler`/`BasicGuider`/
   `SamplerCustomAdvanced`) and finish with `INPAINT_ColorMatch` (against the
-  pre-fill at full denoise, the original below) using the expanded mask as
+   pre-fill at full denoise, the original below) using the uploaded soft mask as
   `exclude_mask`, so repaired pixels blend with the context while unselected
   pixels stay exact. Without a selection the latent is a plain `VAEEncode` of the
   composite plus `SetLatentNoiseMask` whole-frame img2img through
@@ -417,7 +416,7 @@ choices (no code reused):
 Discovery requires the ZIT node set (`UNETLoader`, `CLIPLoader`, `VAELoader`,
 `CLIPSetLastLayer`, `CLIPTextEncode`, `ConditioningZeroOut`, `ModelSamplingAuraFlow`, `VAEEncode`,
 `SetLatentNoiseMask`, `KSampler`, `VAEDecode`, `LoadImage`, `PreviewImage`,
-`DifferentialDiffusion`, `ZImageFunControlnet`, `INPAINT_ExpandMask`,
+`DifferentialDiffusion`, `ZImageFunControlnet`,
 `INPAINT_StabilizeMask`, `INPAINT_ColorMatch`, `INPAINT_LoadInpaintModel`,
 `INPAINT_InpaintWithModel`, `ThresholdMask`, `SplitSigmas`, `RandomNoise`,
 `KSamplerSelect`, `BasicScheduler`, `BasicGuider`, `SamplerCustomAdvanced`) and

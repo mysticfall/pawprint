@@ -766,21 +766,16 @@ def worker():
                             assert classes['38'] == 'CLIPTextEncode'
                             assert graph['38']['inputs']['clip'] == ['37', 0]
                             assert graph['38']['inputs']['text'] == layer.generation_positive
-                            feather = layer.generation_feather
-                            assert classes['26'] == 'INPAINT_ExpandMask'
-                            assert graph['26']['inputs'] == {'mask': ['4', 0], 'grow': feather,
-                                                             'blur': int(feather * 1.7), 'blur_type': 'linear'}
+                            assert '26' not in classes
                             assert classes['27'] == 'INPAINT_StabilizeMask'
-                            assert graph['27']['inputs'] == {'mask': ['26', 0], 'epsilon': 0.01}
+                            assert graph['27']['inputs'] == {'mask': ['4', 0], 'epsilon': 0.01}
                             assert classes['28'] == 'ThresholdMask'
-                            assert graph['28']['inputs'] == {'mask': ['27', 0], 'value': 0.0}
-                            assert classes['33'] == 'INPAINT_ExpandMask'
-                            assert graph['33']['inputs'] == {'mask': ['4', 0], 'grow': 4, 'blur': 0,
-                                                             'blur_type': 'gaussian'}
+                            assert graph['28']['inputs'] == {'mask': ['4', 0], 'value': 0.5}
+                            assert '33' not in classes
                             assert classes['42'] == 'INPAINT_LoadInpaintModel'
                             assert classes['43'] == 'INPAINT_InpaintWithModel'
                             assert graph['43']['inputs']['image'] == ['36', 0]
-                            assert graph['43']['inputs']['mask'] == ['33', 0]
+                            assert graph['43']['inputs']['mask'] == ['28', 0]
                             assert classes['44'] == 'ModelPatchLoader'
                             assert classes['45'] == 'ZImageFunControlnet'
                             assert graph['45']['inputs']['model_patch'] == ['44', 0]
@@ -829,10 +824,7 @@ def worker():
                             # through a MAT inpaint model; refinement encodes
                             # the original pixels with a split sigma schedule.
                             full = layer.generation_denoise >= 1.0
-                            feather = layer.generation_feather
-                            assert classes['26'] == 'INPAINT_ExpandMask', classes.get('26')
-                            assert graph['26']['inputs'] == {'mask': ['4', 0], 'grow': feather,
-                                                             'blur': int(feather * 1.7), 'blur_type': 'linear'}
+                            assert '26' not in classes
                             assert classes['25'] == 'SelfAttentionGuidance'
                             assert classes['29'] == 'DifferentialDiffusion'
                             assert classes['21'] == 'INPAINT_VAEEncodeInpaintConditioning'
@@ -864,13 +856,13 @@ def worker():
                             else:
                                 assert '27' not in classes and '43' not in classes
                                 assert graph['21']['inputs']['pixels'] == ['2', 0]
-                                assert graph['21']['inputs']['mask'] == ['26', 0]
+                                assert graph['21']['inputs']['mask'] == ['4', 0]
                                 assert classes['48'] == 'SplitSigmas'
                                 assert graph['48']['inputs']['step'] == round(
                                     layer.generation_steps * (1 - layer.generation_denoise))
                                 assert graph['49']['inputs']['sigmas'] == ['48', 1]
                                 assert graph['56']['inputs']['reference'] == ['2', 0]
-                                assert graph['56']['inputs']['exclude_mask'] == ['26', 0]
+                                assert graph['56']['inputs']['exclude_mask'] == ['4', 0]
                             assert 'KSampler' not in classes.values()
                             assert 'ImageCompositeMasked' not in classes.values()
                             assert 'InpaintModelConditioning' not in classes.values()

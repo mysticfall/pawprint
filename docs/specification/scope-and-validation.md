@@ -1,6 +1,23 @@
 # Scope and validation
 
-## Current slice: experimental aggressive mesh-flow removal
+## Current slice: once-feathered inpaint masks
+
+Both adapters now consume the feathered mask prepared in saved-image pixels and
+resized with the request crop, without a second backend grow/blur pass. ZIT's
+context mask and MAT's pre-fill mask use greater-than-0.5 coverage independently
+of soft sampling/matching and final placement. Control strength, denoise schedules,
+models, Chord and colour-matching algorithms are unchanged.
+
+Factory Blender verifies actual PNG staging at feather 0/24 and request long-edge
+256/1024, protected holes, disconnected selections and all adapter/denoise paths;
+rendering is stubbed. Fake-server backend checks and isolated UI selection/native
+paint/deletion undo checks pass. Isolated candidate review and Image Editor
+Apply/Layer native undo/redo checks also pass. The user subsequently confirmed
+that the duplicate-landmark problem is fixed in the live scene and approved
+committing this correction. This confirms the tested scene, not arbitrary-hole
+preservation or general colour/semantic continuity.
+
+## Previous slice: experimental aggressive mesh-flow removal
 
 New generations capture evaluated smooth mesh normals from the saved view,
 isolating the active target slot with occluding holdouts. Capture follows viewport
